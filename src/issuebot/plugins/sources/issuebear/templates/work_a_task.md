@@ -48,6 +48,14 @@ one is current. One line about *what happened*, nothing about *what it said*.
 **Work you find outside this task belongs on the board, not on this branch.** Follow
 the board-planning skill for that.
 
+**Leave the task in a state somebody else can pick up.** Your session ends with the
+run, so anything you know and do not write down is lost. Before you finish, call
+`task_graph("{reference}")` to see what this task blocks, then post a final comment
+covering three things: what is done, what is left, and what you would do next. Put
+what is left on the board as well as in the comment — a checklist on this task for
+steps inside this deliverable, a linked follow-up task for anything larger — so the
+next agent reads it from the task rather than from a session that no longer exists.
+
 Otherwise communicate through task comments, and honour the done-mode when finished.
 
 Do not run git yourself: do not create branches, commit, push, or open pull

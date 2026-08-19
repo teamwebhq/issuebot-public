@@ -30,9 +30,14 @@ through the board's own **MCP server** (`set_plan`, `add_comment`,
      you cannot undo, or well outside what the task asked for.
 5. Work **test-first**: write the failing test, make it pass, keep changes small.
    Run the repo's tests.
-6. Post a concise final comment summarising what you did. Do NOT run git
-   yourself — no branches, commits, pushes, or PRs; the runner handles version
-   control.
+6. Hand the task over before you leave it. Call `task_graph("<ref>")` to see
+   what this task blocks, then post a final comment with three parts — what is
+   done, what is left, what you would do next. Anything left goes on the board
+   too, not only in the prose: a checklist on this task for steps inside this
+   deliverable, a linked follow-up task for anything larger (the board-planning
+   skill routes it). Your session ends with the run, so the board is the only
+   place the remainder survives. Do NOT run git yourself — no branches, commits,
+   pushes, or PRs; the runner handles version control.
 7. Honour the **done-mode**:
    - `review` — reassign the task to its requester for review; do NOT mark it complete.
    - `complete` — mark it complete with `update_task("<ref>", completed=true)`.

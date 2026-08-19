@@ -99,6 +99,18 @@ def test_render_build_prompt_instructs_the_asking_tool():
     assert "guessing" in out.lower() or "guess" in out.lower()
 
 
+def test_the_work_prompt_asks_for_a_handoff_of_what_is_left() -> None:
+    """A run ends and its session is gone. Whatever the agent knew about the
+    work it did not finish only survives if the board holds it, so the prompt
+    has to ask for the remainder in the final comment and on the board."""
+    out = render_work_prompt(reference="ISS-1", done="review")
+    lowered = out.lower()
+
+    assert "what is left" in lowered
+    assert "checklist" in lowered
+    assert "task_graph" in out
+
+
 def test_render_mention_prompt_contains_all_template_fields() -> None:
     """render_mention_prompt fills in reference, actor_name, comment_excerpt, and agent_id."""
     out = render_mention_prompt(
