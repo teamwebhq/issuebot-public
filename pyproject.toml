@@ -1,0 +1,47 @@
+[project]
+name = "issuebot"
+version = "0.2.3"
+description = "Run a coding agent against the tasks its configured source assigns it."
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "typer>=0.12",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "tomli-w>=1.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "ty>=0.0.1"]
+
+[project.scripts]
+issuebot = "issuebot.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/issuebot"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C90"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer's declarative API requires Option/Argument calls in argument defaults.
+# Every command module — the top-level CLI and each plugin's own — needs this.
+"**/cli.py" = ["B008"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ty.src]
+exclude = ["tests", "migrations"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

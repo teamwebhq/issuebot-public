@@ -1,0 +1,9 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Internal-only files, left out of the public snapshot (see tools/publish.sh)
+CLAUDE.md         export-ignore
+CONTEXT.md        export-ignore
+docs/adr/         export-ignore
+docs/superpowers/ export-ignore
+.superpowers/     export-ignore

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+uv run ruff check .
+uv run ruff format --check .
+uv run ty check
