@@ -123,7 +123,7 @@ def test_readme_installs_the_latest_immutable_release() -> None:
     readme = (ROOT / "README.md").read_text()
 
     assert "/releases/latest/download/install.sh" in readme
-    assert "raw.githubusercontent.com/teamwebhq/issuebot/main/install.sh" not in readme
+    assert "raw.githubusercontent.com/teamwebhq/issuebot-public/main/install.sh" not in readme
     assert "version --commit" not in readme
 
 

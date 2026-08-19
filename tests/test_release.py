@@ -77,7 +77,7 @@ printf '# downloaded installer\\n' > "$output"
 def test_release_urls_name_the_exact_versioned_assets() -> None:
     release = _release()
     assert release.wheel_url("1.2.3") == (
-        "https://github.com/teamwebhq/issuebot/releases/download/"
+        "https://github.com/teamwebhq/issuebot-public/releases/download/"
         "v1.2.3/issuebot-1.2.3-py3-none-any.whl"
     )
     assert release.installer_url("1.2.3").endswith("/v1.2.3/install.sh")
@@ -89,11 +89,11 @@ def test_release_urls_name_the_exact_versioned_assets() -> None:
     [
         (
             DEFAULT_UPDATE_COMMAND,
-            "https://github.com/teamwebhq/issuebot/releases/latest/download/install.sh",
+            "https://github.com/teamwebhq/issuebot-public/releases/latest/download/install.sh",
         ),
         (
             update_argv("1.2.3"),
-            "https://github.com/teamwebhq/issuebot/releases/download/v1.2.3/install.sh",
+            "https://github.com/teamwebhq/issuebot-public/releases/download/v1.2.3/install.sh",
         ),
     ],
 )

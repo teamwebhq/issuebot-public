@@ -57,7 +57,7 @@ class Install:
             "curl",
             f'echo "curl $*" >> {log}\n'
             'case "$*" in\n'
-            '    *"/releases/latest"*) printf "https://github.com/teamwebhq/issuebot/'
+            '    *"/releases/latest"*) printf "https://github.com/teamwebhq/issuebot-public/'
             f'releases/tag/v{LATEST_VERSION}" ;;\n'
             "esac\n",
         )
@@ -102,7 +102,7 @@ def test_it_installs_the_exact_release_wheel(tmp_path: Path):
 
     assert run.done.returncode == 0
     assert (
-        "https://github.com/teamwebhq/issuebot/releases/download/"
+        "https://github.com/teamwebhq/issuebot-public/releases/download/"
         "v1.2.3/issuebot-1.2.3-py3-none-any.whl"
     ) in run.install
 

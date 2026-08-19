@@ -39,7 +39,7 @@ a `Source` for each connection with `source_for`.
 Use these commands from a checkout:
 
 ```sh
-git clone https://github.com/teamwebhq/issuebot && cd issuebot
+git clone https://github.com/teamwebhq/issuebot-public && cd issuebot
 uv sync
 uv run issuebot --help
 tools/check.sh

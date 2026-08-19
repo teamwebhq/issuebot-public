@@ -10,4 +10,4 @@ except PackageNotFoundError:  # a source tree that was never installed
     __version__ = "0+unknown"
 
 
-REPO_URL = "https://github.com/teamwebhq/issuebot"
+REPO_URL = "https://github.com/teamwebhq/issuebot-public"

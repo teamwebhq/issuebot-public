@@ -2,7 +2,7 @@
 #
 # Install issuebot from an immutable GitHub Release wheel.
 #
-#   curl -fsSL https://github.com/teamwebhq/issuebot/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/teamwebhq/issuebot-public/releases/latest/download/install.sh | sh
 #
 # Pass a stable X.Y.Z release to install that exact artifact. With no argument,
 # the installer resolves GitHub's latest-release redirect before constructing
@@ -14,7 +14,7 @@ VERSION="${1:-${ISSUEBOT_VERSION:-}}"
 
 if [ -z "$VERSION" ]; then
     LATEST_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-        https://github.com/teamwebhq/issuebot/releases/latest)"
+        https://github.com/teamwebhq/issuebot-public/releases/latest)"
     VERSION="${LATEST_URL##*/}"
     VERSION="${VERSION#v}"
 fi
@@ -25,7 +25,7 @@ printf '%s' "$VERSION" | grep -qE \
     exit 1
 }
 
-WHEEL_URL="https://github.com/teamwebhq/issuebot/releases/download/v$VERSION/issuebot-$VERSION-py3-none-any.whl"
+WHEEL_URL="https://github.com/teamwebhq/issuebot-public/releases/download/v$VERSION/issuebot-$VERSION-py3-none-any.whl"
 
 # The uv this bootstraps when an image has none. Pinned, because it runs beside
 # a sandbox's GH_TOKEN and ANTHROPIC_API_KEY and "latest, whatever that is

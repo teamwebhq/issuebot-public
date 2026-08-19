@@ -51,10 +51,10 @@ version to install that specified release.
 
 ```sh
 # latest release
-curl -fsSL https://github.com/teamwebhq/issuebot/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/teamwebhq/issuebot-public/releases/latest/download/install.sh | sh
 
 # exact release
-curl -fsSL https://github.com/teamwebhq/issuebot/releases/download/v0.2.0/install.sh | sh -s -- 0.2.0
+curl -fsSL https://github.com/teamwebhq/issuebot-public/releases/download/v0.2.0/install.sh | sh -s -- 0.2.0
 ```
 
 Before you start, make sure that the machine has `curl`. If necessary, the
