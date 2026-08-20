@@ -1,6 +1,5 @@
 import importlib
 import os
-import shlex
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError
@@ -8,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from issuebot.config import DEFAULT_UPDATE_COMMAND
+from issuebot.release import installer_argv
 from issuebot.sandbox_protocol import update_argv
 
 
@@ -89,7 +88,7 @@ def test_release_urls_name_the_exact_versioned_assets() -> None:
     ("command", "url"),
     [
         (
-            DEFAULT_UPDATE_COMMAND,
+            installer_argv(),
             "https://github.com/teamwebhq/issuebot-public/releases/latest/download/install.sh",
         ),
         (
@@ -99,9 +98,9 @@ def test_release_urls_name_the_exact_versioned_assets() -> None:
     ],
 )
 def test_a_failed_installer_download_is_nonzero_and_never_runs_sh(
-    tmp_path: Path, command: str | list[str], url: str
+    tmp_path: Path, command: list[str], url: str
 ) -> None:
-    script = command[2] if isinstance(command, list) else shlex.split(command)[2]
+    script = command[2]
     result, curl, installer, downloaded = _execute_installer_command(tmp_path, script, curl_exit=23)
 
     assert result.returncode != 0
@@ -113,14 +112,14 @@ def test_a_failed_installer_download_is_nonzero_and_never_runs_sh(
 @pytest.mark.parametrize(
     ("command", "expected_installer_args"),
     [
-        (DEFAULT_UPDATE_COMMAND, []),
+        (installer_argv(), []),
         (update_argv("1.2.3"), ["1.2.3"]),
     ],
 )
 def test_a_successful_installer_download_runs_the_file_then_cleans_it_up(
-    tmp_path: Path, command: str | list[str], expected_installer_args: list[str]
+    tmp_path: Path, command: list[str], expected_installer_args: list[str]
 ) -> None:
-    script = command[2] if isinstance(command, list) else shlex.split(command)[2]
+    script = command[2]
     result, _curl, installer, downloaded = _execute_installer_command(tmp_path, script, curl_exit=0)
 
     assert result.returncode == 0

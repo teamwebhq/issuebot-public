@@ -6,7 +6,6 @@ from pydantic import BaseModel
 from conftest import config, connection, in_process_environment
 from issuebot import plugins
 from issuebot.config import (
-    DEFAULT_UPDATE_COMMAND,
     Config,
     Connection,
     SinkRef,
@@ -92,7 +91,6 @@ def test_the_config_keeps_only_what_is_core():
     assert set(Config.model_fields) == {
         "harness",
         "task_timeout_minutes",
-        "update_command",
         "max_concurrent",
         "connections",
     }
@@ -186,7 +184,6 @@ def test_core_config_defaults():
     cfg = Config()
     assert cfg.harness is None  # resolved at use, see `harness_name`
     assert cfg.task_timeout_minutes is None
-    assert cfg.update_command == DEFAULT_UPDATE_COMMAND
     assert cfg.max_concurrent == 1
     assert cfg.connections == []
 

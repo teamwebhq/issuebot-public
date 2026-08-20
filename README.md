@@ -232,7 +232,6 @@ Core keys:
 | `harness` | — | Agent CLI that does the work. **Necessary** only if more than one harness is installed |
 | `max_concurrent` | `1` | Maximum number of tasks that issuebot does at the same time for all connections. Restart issuebot after a change |
 | `task_timeout_minutes` | not set | Maximum time for one run. If not set, there is no maximum |
-| `update_command` | the latest-release [installer](#install) | Command that starts when the board sends an update control |
 | `connections` | `[]` | Connections, with one array-of-tables entry for each connection |
 
 The `harness` key and the `executor` key of each connection have no default. If
@@ -250,10 +249,10 @@ mode, it stops if you do not give `--executor` and more than one environment is
 installed. `issuebot init` writes `harness`. Refer to
 [Environments](#environments).
 
-The default `update_command` downloads `install.sh` from the latest GitHub
-Release. issuebot starts the command without a shell. Write a different command
-as a command string with its arguments. To use a pipeline, put it in
-`sh -c '…'`.
+An update control makes issuebot install itself again. It downloads `install.sh`
+from the latest GitHub Release and runs it. There is no configuration key for
+this: issuebot finds the command when the update control arrives. Thus, an
+install always uses the [installer](#install) of the build that runs.
 
 An update waits for active tasks. issuebot stops new task claims and lets the
 active tasks complete. Then, it does the update. The update control gives each

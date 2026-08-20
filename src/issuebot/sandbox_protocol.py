@@ -251,7 +251,7 @@ def parse_version(lines: Iterable[str]) -> str:
 
 def update_argv(version: str) -> list[str]:
     """Install the controller's exact GitHub Release in a sandbox."""
-    return ["sh", "-c", release.installer_command(version)]
+    return release.installer_argv(version)
 
 
 @dataclass(frozen=True)

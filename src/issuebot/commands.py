@@ -20,15 +20,13 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
 import subprocess
 import sys
 import threading
 from collections.abc import Callable
 from typing import Protocol
 
-from issuebot.config import DEFAULT_UPDATE_COMMAND
-from issuebot.release import install_bin_dir
+from issuebot.release import install_bin_dir, installer_argv
 from issuebot.transient import log_poll_failure
 
 logger = logging.getLogger("issuebot")
@@ -97,8 +95,13 @@ def _update_env() -> dict[str, str]:
     return env
 
 
-def _default_run_update(command: str) -> None:
-    """Run the self-update command (no shell), raising on a non-zero exit.
+def _default_run_update() -> None:
+    """Run the self-update (no shell), raising on a non-zero exit.
+
+    What to run is worked out here, when the update arrives, rather than read
+    back from a config file written whenever the wizard last ran: how this build
+    installs itself is a property of this build, and a stored copy of it only
+    ever goes stale.
 
     The installer's output is captured and logged, and a failure carries the tail
     of its stderr into the exception message — ``_handle`` acks that message, and
@@ -107,7 +110,7 @@ def _default_run_update(command: str) -> None:
     """
     try:
         done = subprocess.run(
-            shlex.split(command),
+            installer_argv(),
             check=True,
             env=_update_env(),
             capture_output=True,
@@ -128,8 +131,7 @@ def run_command_loop(
     stop: threading.Event,
     listeners: list[_Stoppable],
     relaunch: Callable[[], None] = _default_relaunch,
-    run_update: Callable[[str], None] = _default_run_update,
-    update_command: str = DEFAULT_UPDATE_COMMAND,
+    run_update: Callable[[], None] = _default_run_update,
     wait_timeout: int = 25,
     install_id: str | None = None,
     drain_timeout: float = DRAIN_TIMEOUT,
@@ -155,7 +157,7 @@ def run_command_loop(
         for command in commands:
             if stop.is_set():
                 return
-            _handle(command, client, listeners, relaunch, run_update, update_command, drain_timeout)
+            _handle(command, client, listeners, relaunch, run_update, drain_timeout)
 
 
 def _handle(
@@ -163,8 +165,7 @@ def _handle(
     client: _CommandClient,
     listeners: list[_Stoppable],
     relaunch: Callable[[], None],
-    run_update: Callable[[str], None],
-    update_command: str,
+    run_update: Callable[[], None],
     drain_timeout: float = DRAIN_TIMEOUT,
 ) -> None:
     """Execute one command: restart or update (unknown kinds are logged and ignored)."""
@@ -200,7 +201,7 @@ def _handle(
             return
 
         try:
-            run_update(update_command)
+            run_update()
         except Exception as exc:  # noqa: BLE001 — a bad upgrade must not brick the runner
             logger.warning("update command failed", exc_info=True)
             # The runner carries on serving on the old code, so it has to start

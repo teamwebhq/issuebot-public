@@ -42,7 +42,6 @@ from issuebot import run as run_pipeline
 from issuebot.agent_state import AgentState, ConnectionSnapshot, LogTailHandler
 from issuebot.commands import run_command_loop
 from issuebot.config import (
-    DEFAULT_UPDATE_COMMAND,
     Config,
     Connection,
     SinkRef,
@@ -841,7 +840,6 @@ class Supervisor:
             default_config_path(),
             store=sessions.store_for(cfg, harness),
             telemetry_interval=api.telemetry_interval,
-            update_command=cfg.update_command,
             version=__version__,
             names=names or None,
             install_path=install_store.default_install_path(),
@@ -856,7 +854,6 @@ class Supervisor:
         store: SessionStore | None = None,
         poll_interval: float = 2.0,
         telemetry_interval: float = 15.0,
-        update_command: str = DEFAULT_UPDATE_COMMAND,
         version: str = "",
         names: list[str] | None = None,
         status_store: StatusStore | None = None,
@@ -876,7 +873,6 @@ class Supervisor:
         # started once the previous has returned, so a hung server drops
         # telemetry ticks instead of backing the publish loop up behind it.
         self._telemetry_thread: threading.Thread | None = None
-        self._update_command = update_command
         self._version = version
         self._status_store = status_store or StatusStore(default_status_path())
         # Resolved in start(); None until then (telemetry reports it as unknown).
@@ -1160,7 +1156,6 @@ class Supervisor:
                 # Pass the Supervisor itself as the stoppable — on a restart or
                 # update command it calls stop() which tears down all listeners.
                 "listeners": [self],
-                "update_command": self._update_command,
                 "install_id": self._install_id,
             },
             daemon=True,

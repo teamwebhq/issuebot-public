@@ -44,6 +44,21 @@ def installer_command(version: str | None = None) -> str:
 INSTALL_COMMAND = installer_command()
 
 
+def installer_argv(version: str | None = None) -> list[str]:
+    """Argv that installs the latest (or one exact) release, without a shell.
+
+    The one definition of how an issuebot install updates itself — a self-update
+    on the local machine and an install inside a sandbox run the same program.
+    It is built when the update happens, never stored, so a config or an image
+    written months ago cannot pin an install to an installer URL that has moved.
+
+    ``sh -c`` because every caller hands this argv straight to an executor that
+    uses no shell, so the download-then-install shell program must be one
+    argument rather than three.
+    """
+    return ["sh", "-c", installer_command(version)]
+
+
 def wheel_url(version: str) -> str:
     """Return the canonical wheel asset URL for one release."""
     checked = stable_version(version)

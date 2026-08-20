@@ -6,10 +6,10 @@ import threading
 
 import pytest
 
+from conftest import config
 from issuebot import commands, release
 from issuebot.commands import run_command_loop
-from issuebot.config import DEFAULT_UPDATE_COMMAND, Config
-from issuebot.runner import Supervisor
+from issuebot.config import load_config, save_config
 
 
 class _Listener:
@@ -72,8 +72,7 @@ def test_restart_acks_stops_listeners_and_relaunches():
         stop=stop,
         listeners=[listener],
         relaunch=relaunch,
-        run_update=lambda cmd: None,
-        update_command="x",
+        run_update=lambda: None,
         wait_timeout=0,
     )
 
@@ -82,13 +81,13 @@ def test_restart_acks_stops_listeners_and_relaunches():
     assert relaunched["hit"] is True
 
 
-def test_update_runs_command_then_relaunches():
+def test_update_runs_the_update_then_relaunches():
     stop = threading.Event()
     client = _CmdClient({"id": "c2", "kind": "update"}, stop)
-    ran = {"cmd": None}
+    ran = {"hit": False}
 
-    def run_update(cmd: str) -> None:
-        ran["cmd"] = cmd
+    def run_update() -> None:
+        ran["hit"] = True
 
     def relaunch() -> None:
         stop.set()
@@ -99,11 +98,10 @@ def test_update_runs_command_then_relaunches():
         listeners=[],
         relaunch=relaunch,
         run_update=run_update,
-        update_command="uv tool upgrade issuebot",
         wait_timeout=0,
     )
 
-    assert ran["cmd"] == "uv tool upgrade issuebot"
+    assert ran["hit"] is True
     assert client.acks[0]["status"] == "done"
 
 
@@ -112,7 +110,7 @@ def test_update_failure_acks_failed_and_does_not_relaunch():
     client = _CmdClient({"id": "c3", "kind": "update"}, stop)
     relaunched = {"hit": False}
 
-    def run_update(cmd: str) -> None:
+    def run_update() -> None:
         raise RuntimeError("upgrade boom")
 
     def relaunch() -> None:
@@ -124,7 +122,6 @@ def test_update_failure_acks_failed_and_does_not_relaunch():
         listeners=[],
         relaunch=relaunch,
         run_update=run_update,
-        update_command="x",
         wait_timeout=0,
     )
 
@@ -144,8 +141,7 @@ def test_command_loop_passes_install_id_to_wait():
         stop=stop,
         listeners=[],
         relaunch=lambda: None,
-        run_update=lambda cmd: None,
-        update_command="x",
+        run_update=lambda: None,
         wait_timeout=0,
         install_id="inst-77",
     )
@@ -153,18 +149,8 @@ def test_command_loop_passes_install_id_to_wait():
     assert all(iid == "inst-77" for iid in client.seen_install_ids)
 
 
-def test_the_default_update_command_runs_the_installer_through_a_shell(monkeypatch):
-    """The default has to survive the executor, which uses no shell.
-
-    `_default_run_update` splits the command with `shlex.split` and hands the
-    argv to `subprocess.run`, so a bare `curl … | sh` would reach `curl` as
-    three extra arguments and the pipe would never be a pipe. This asserts the
-    argv that actually gets executed, not just the string: the two halves are
-    one contract and testing either alone lets the other drift.
-
-    The old default (`uv tool upgrade issuebot`) fails this — and failed for
-    real, resolving a package name that is not on any index and never will be.
-    """
+def _capture_installer(monkeypatch) -> dict[str, list[str]]:
+    """Stand in for the installer, recording the argv the update really runs."""
     ran: dict[str, list[str]] = {}
 
     def fake_run(argv, **kwargs):
@@ -173,19 +159,58 @@ def test_the_default_update_command_runs_the_installer_through_a_shell(monkeypat
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(commands.subprocess, "run", fake_run)
-    commands._default_run_update(DEFAULT_UPDATE_COMMAND)
+    return ran
+
+
+def test_the_update_runs_the_installer_through_a_shell(monkeypatch):
+    """The update has to survive the executor, which uses no shell.
+
+    `_default_run_update` hands an argv straight to `subprocess.run`, so a bare
+    `curl … | sh` would reach `curl` as three extra arguments and the pipe would
+    never be a pipe. This asserts the argv that actually gets executed.
+
+    The old default (`uv tool upgrade issuebot`) fails this — and failed for
+    real, resolving a package name that is not on any index and never will be.
+    """
+    ran = _capture_installer(monkeypatch)
+
+    commands._default_run_update()
 
     shell, flag, script = ran["argv"]
     assert (shell, flag) == ("sh", "-c")
     assert script == release.INSTALL_COMMAND
-    assert shlex.split(DEFAULT_UPDATE_COMMAND) == ["sh", "-c", release.INSTALL_COMMAND]
+    # One definition of how this runner updates itself, shared with the sandbox
+    # install — the three stale copies this replaces were a real bug.
+    assert ran["argv"] == release.installer_argv()
 
 
-def test_the_default_update_command_is_defined_once():
-    """Three copies of this string is how two of them go stale — and did."""
-    assert Config().update_command == DEFAULT_UPDATE_COMMAND
-    assert run_command_loop.__kwdefaults__["update_command"] == DEFAULT_UPDATE_COMMAND
-    assert Supervisor.__init__.__kwdefaults__["update_command"] == DEFAULT_UPDATE_COMMAND
+def test_a_stored_update_command_has_no_say_in_what_is_run(monkeypatch, tmp_path):
+    """The runner works out how to update itself when the update arrives.
+
+    An older config carries an `update_command` key: a snapshot of what some
+    earlier build thought its installer URL was, frozen when the wizard ran. It
+    still loads — and it changes nothing.
+    """
+    path = tmp_path / "config.toml"
+    save_config(config(update_command="sh -c 'echo stale installer'"), path)
+
+    assert load_config(path) is not None  # an old config is still a valid one
+
+    ran = _capture_installer(monkeypatch)
+    stop = threading.Event()
+    client = _CmdClient({"id": "c9", "kind": "update"}, stop)
+
+    run_command_loop(
+        client,
+        stop=stop,
+        listeners=[],
+        relaunch=stop.set,
+        wait_timeout=0,
+    )
+
+    assert client.acks[0]["status"] == "done"
+    assert ran["argv"] == release.installer_argv()
+    assert not any("stale" in arg for arg in ran["argv"])
 
 
 def test_update_waits_for_in_flight_work_before_touching_anything():
@@ -196,7 +221,7 @@ def test_update_waits_for_in_flight_work_before_touching_anything():
     client = _CmdClient({"id": "c4", "kind": "update"}, stop)
     listener = _Listener()
 
-    def run_update(cmd: str) -> None:
+    def run_update() -> None:
         listener.events.append("updated")
 
     run_command_loop(
@@ -205,7 +230,6 @@ def test_update_waits_for_in_flight_work_before_touching_anything():
         listeners=[listener],
         relaunch=stop.set,
         run_update=run_update,
-        update_command="x",
         wait_timeout=0,
         drain_timeout=1.5,
     )
@@ -221,7 +245,7 @@ def test_a_failed_update_starts_claiming_again():
     client = _CmdClient({"id": "c5", "kind": "update"}, stop)
     listener = _Listener()
 
-    def run_update(cmd: str) -> None:
+    def run_update() -> None:
         raise RuntimeError("upgrade boom")
 
     run_command_loop(
@@ -230,7 +254,6 @@ def test_a_failed_update_starts_claiming_again():
         listeners=[listener],
         relaunch=lambda: None,
         run_update=run_update,
-        update_command="x",
         wait_timeout=0,
     )
 
@@ -255,8 +278,7 @@ def test_an_update_that_cannot_drain_is_refused():
         stop=stop,
         listeners=[listener],
         relaunch=relaunch,
-        run_update=lambda cmd: listener.events.append("updated"),
-        update_command="x",
+        run_update=lambda: listener.events.append("updated"),
         wait_timeout=0,
         drain_timeout=0.01,
     )
@@ -279,8 +301,7 @@ def test_a_restart_does_not_wait_for_in_flight_work():
         stop=stop,
         listeners=[listener],
         relaunch=stop.set,
-        run_update=lambda cmd: None,
-        update_command="x",
+        run_update=lambda: None,
         wait_timeout=0,
     )
 
@@ -304,7 +325,11 @@ def test_an_update_reinstalls_over_the_running_binary(tmp_path, monkeypatch):
 
     recorded = tmp_path / "env.txt"
     script = f'printf "%s\\n%s\\n" "$ISSUEBOT_BIN_DIR" "$PATH" > {shlex.quote(str(recorded))}'
-    commands._default_run_update(shlex.join(["sh", "-c", script]))
+    # Stand in for the release installer: what it does is this test's subject,
+    # not which URL it came from.
+    monkeypatch.setattr(commands, "installer_argv", lambda: ["sh", "-c", script])
+
+    commands._default_run_update()
 
     seen_bin_dir, seen_path = recorded.read_text().splitlines()
     assert seen_bin_dir == str(bin_dir)
@@ -322,8 +347,9 @@ def test_a_failed_update_says_what_the_installer_said(tmp_path, monkeypatch):
     complaint = "issuebot: /home/richard/.local/bin is not on PATH"
     installer = tmp_path / "install.sh"
     installer.write_text(f"echo {shlex.quote(complaint)} >&2\nexit 1\n")
+    monkeypatch.setattr(commands, "installer_argv", lambda: ["sh", str(installer)])
 
     with pytest.raises(Exception) as failure:
-        commands._default_run_update(shlex.join(["sh", str(installer)]))
+        commands._default_run_update()
 
     assert complaint in str(failure.value)

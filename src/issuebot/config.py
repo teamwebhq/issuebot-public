@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import difflib
 import os
-import shlex
 import tomllib
 from collections.abc import Iterable
 from pathlib import Path
@@ -33,7 +32,7 @@ import tomli_w
 import typer
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
-from issuebot import plugins, release
+from issuebot import plugins
 from issuebot.plugins.base import (
     EnvironmentPlugin,
     HarnessPlugin,
@@ -50,18 +49,16 @@ if TYPE_CHECKING:
 # Full-path override for the config file, honoured ahead of the XDG location.
 CONFIG_ENV = "ISSUEBOT_CONFIG"
 
-# What a runner runs when the board tells it to update itself, unless the config
-# says otherwise. The one definition — `Config.update_command`'s default, the
-# `Supervisor`'s and the command loop's — because three copies of a string is
-# how two of them end up stale.
+# Keys this build no longer has, ignored instead of rejected. The governing rule
+# is that a key nothing can honour is an error — but a key *this project* used to
+# write into every config it saved is the one exception: the runner updates
+# itself and re-execs, so a retired key that failed validation would leave an
+# install that upgraded successfully and then could not read its own config.
 #
-# It runs issuebot's own latest-release installer. The release installer then
-# resolves the latest immutable wheel before installing it.
-#
-# `sh -c` because the command is executed WITHOUT a shell (`commands.
-# _default_run_update` splits it with `shlex.split` and hands argv to
-# `subprocess.run`), so the download/install shell program must be one argv.
-DEFAULT_UPDATE_COMMAND = shlex.join(["sh", "-c", release.installer_command()])
+# `update_command` held a copy of the installer command, frozen when the wizard
+# ran. How a runner updates itself is now worked out when the update arrives
+# (`release.installer_argv`), so the stored copy has nothing left to say.
+RETIRED_KEYS = frozenset({"update_command"})
 
 
 class SinkRef(BaseModel):
@@ -196,8 +193,6 @@ class Config(BaseModel):
     # ends when the agent exits or the user aborts). When set, a run that
     # exceeds it is auto-aborted and classified "timed out".
     task_timeout_minutes: int | None = None
-    # Command run to self-update on an "update" control before re-exec.
-    update_command: str = DEFAULT_UPDATE_COMMAND
     # Maximum number of tasks the runner works on concurrently.
     max_concurrent: int = 1
     connections: list[Connection] = []
@@ -767,6 +762,9 @@ def validate_config(cfg: Config) -> list[str]:
     problems: list[str] = []
 
     for key, value in (cfg.model_extra or {}).items():
+        if key in RETIRED_KEYS:
+            continue
+
         if key not in plugins.every_name():
             problems.append(f"unknown key '{key}'{_suggest(key)}")
             continue

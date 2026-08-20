@@ -14,6 +14,7 @@ has no real TTY) exactly like every other command in this codebase.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TypeVar
 
@@ -55,9 +56,19 @@ def setup() -> Config:
     # already announces rather than asks when there is only one of them.
     harness = choose("Harness", plugins.offered("harnesses"), to_label=str)
 
-    # Optionally point at the harness executable when it isn't on PATH (e.g. an
-    # install under a home directory). Blank means "resolve the name on PATH".
-    command = typer.prompt("Harness executable path (blank = on PATH)", default="").strip()
+    # Where the harness executable is. Resolved here rather than left to the
+    # run: a runner started as a service (systemd, launchd, container exec) gets
+    # a minimal PATH — often just /usr/bin:/bin — so a bare name that a human
+    # finds in their login shell is a name the service cannot find, and the
+    # failure only surfaces later, inside a task. The harness plugin's name
+    # ("claude", "codex") is assumed to be the executable's name.
+    #
+    # Nothing found is not an error: the config may be being written on one box
+    # for another. Then the default stays empty, and blank means "resolve the
+    # name on PATH at run time", exactly as before.
+    found = shutil.which(harness) or ""
+    label = "Harness executable path" if found else "Harness executable path (blank = on PATH)"
+    command = typer.prompt(label, default=found).strip()
 
     return Config.model_validate(
         {
