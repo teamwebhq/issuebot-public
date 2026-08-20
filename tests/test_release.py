@@ -2,6 +2,7 @@ import importlib
 import os
 import shlex
 import subprocess
+import sys
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
@@ -155,3 +156,13 @@ def test_a_package_without_distribution_metadata_is_not_a_release_wheel(monkeypa
 
     monkeypatch.setattr(release, "distribution", missing)
     assert release.is_installed_wheel() is False
+
+
+def test_the_install_bin_dir_is_known_only_from_the_console_script(tmp_path, monkeypatch) -> None:
+    """Pinning the install location is right only when a console script ran it."""
+    release = _release()
+    monkeypatch.setattr(sys, "argv", [str(tmp_path / "bin" / "issuebot"), "run"])
+    assert release.install_bin_dir() == tmp_path / "bin"
+
+    monkeypatch.setattr(sys, "argv", [str(tmp_path / "bin" / "pytest")])
+    assert release.install_bin_dir() is None

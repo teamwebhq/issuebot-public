@@ -49,11 +49,14 @@ Each GitHub Release has an issuebot wheel for one stable version. With no
 version, the installer uses GitHub's latest release. Give a stable `X.Y.Z`
 version to install that specified release.
 
-```sh
-# latest release
-curl -fsSL https://github.com/teamwebhq/issuebot-public/releases/latest/download/install.sh | sh
+### Latest Release
 
-# exact release
+```sh
+curl -fsSL https://github.com/teamwebhq/issuebot-public/releases/latest/download/install.sh | sh
+```
+
+### Exact Release
+```
 curl -fsSL https://github.com/teamwebhq/issuebot-public/releases/download/v0.2.0/install.sh | sh -s -- 0.2.0
 ```
 

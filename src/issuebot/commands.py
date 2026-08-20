@@ -28,6 +28,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from issuebot.config import DEFAULT_UPDATE_COMMAND
+from issuebot.release import install_bin_dir
 from issuebot.transient import log_poll_failure
 
 logger = logging.getLogger("issuebot")
@@ -70,9 +71,55 @@ def _default_relaunch() -> None:
     os.execv(sys.orig_argv[0], sys.orig_argv)
 
 
+# How much of the installer's own complaint travels back to the board. Enough
+# to carry the line that explains the failure, bounded because the ack is not a
+# log file.
+_REASON_CHARS = 400
+
+
+def _update_env() -> dict[str, str]:
+    """Environment that makes the installer reinstall over the running binary.
+
+    ``install.sh`` re-derives where to install and then refuses a directory that
+    is not on the PATH it was handed. A runner whose PATH lacks ``~/.local/bin``
+    would therefore be told its own working install is unreachable. Naming the
+    directory of the running console script answers both: it is where the update
+    must land, and the running process is the proof that it is reachable.
+    """
+    env = dict(os.environ)
+    bin_dir = install_bin_dir()
+
+    if bin_dir is None:
+        return env  # not started from the console script; nothing to pin
+
+    env["ISSUEBOT_BIN_DIR"] = str(bin_dir)
+    env["PATH"] = os.pathsep.join(filter(None, [str(bin_dir), env.get("PATH", "")]))
+    return env
+
+
 def _default_run_update(command: str) -> None:
-    """Run the self-update command (no shell), raising on a non-zero exit."""
-    subprocess.run(shlex.split(command), check=True)
+    """Run the self-update command (no shell), raising on a non-zero exit.
+
+    The installer's output is captured and logged, and a failure carries the tail
+    of its stderr into the exception message — ``_handle`` acks that message, and
+    ``str(CalledProcessError)`` alone only ever says "returned non-zero exit
+    status 1", which tells the board nothing about what went wrong.
+    """
+    try:
+        done = subprocess.run(
+            shlex.split(command),
+            check=True,
+            env=_update_env(),
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        output = ((exc.stdout or "") + (exc.stderr or "")).strip()
+        logger.warning("installer failed (exit %s):\n%s", exc.returncode, output)
+        reason = output[-_REASON_CHARS:] or "no output"
+        raise RuntimeError(f"installer failed (exit {exc.returncode}): {reason}") from exc
+
+    logger.info("installer output:\n%s", ((done.stdout or "") + (done.stderr or "")).strip())
 
 
 def run_command_loop(

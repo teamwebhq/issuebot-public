@@ -1,6 +1,10 @@
+import os
 import shlex
 import subprocess
+import sys
 import threading
+
+import pytest
 
 from issuebot import commands, release
 from issuebot.commands import run_command_loop
@@ -282,3 +286,44 @@ def test_a_restart_does_not_wait_for_in_flight_work():
 
     assert listener.held == []
     assert listener.stopped is True
+
+
+def test_an_update_reinstalls_over_the_running_binary(tmp_path, monkeypatch):
+    """The installer must land back on the binary that is running.
+
+    install.sh re-derives its own BIN_DIR and refuses a directory that is not on
+    the PATH it was handed — which is how an update of a working
+    `~/.local/bin/issuebot` failed from a runner whose PATH had no `~/.local/bin`.
+    The running console script is the proof that its own directory is reachable,
+    so the update names it and puts it on PATH.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "issuebot").touch()
+    monkeypatch.setattr(sys, "argv", [str(bin_dir / "issuebot"), "run"])
+
+    recorded = tmp_path / "env.txt"
+    script = f'printf "%s\\n%s\\n" "$ISSUEBOT_BIN_DIR" "$PATH" > {shlex.quote(str(recorded))}'
+    commands._default_run_update(shlex.join(["sh", "-c", script]))
+
+    seen_bin_dir, seen_path = recorded.read_text().splitlines()
+    assert seen_bin_dir == str(bin_dir)
+    assert str(bin_dir) in seen_path.split(os.pathsep)
+
+
+def test_a_failed_update_says_what_the_installer_said(tmp_path, monkeypatch):
+    """`_handle` acks the exception text, so the board reads the real reason.
+
+    The complaint lives in the installer, not in the command line, because
+    `str(CalledProcessError)` quotes the argv and would otherwise pass by
+    accident while the board still learned nothing.
+    """
+    monkeypatch.setattr(sys, "argv", ["pytest"])
+    complaint = "issuebot: /home/richard/.local/bin is not on PATH"
+    installer = tmp_path / "install.sh"
+    installer.write_text(f"echo {shlex.quote(complaint)} >&2\nexit 1\n")
+
+    with pytest.raises(Exception) as failure:
+        commands._default_run_update(shlex.join(["sh", str(installer)]))
+
+    assert complaint in str(failure.value)

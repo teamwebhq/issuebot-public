@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import sys
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
@@ -56,3 +58,21 @@ def is_installed_wheel() -> bool:
         return False
     imported = Path(__file__).resolve().parent
     return imported == installed
+
+
+def install_bin_dir() -> Path | None:
+    """Directory the running issuebot console script was launched from.
+
+    ``uv tool install`` writes the ``issuebot`` console script into the bin
+    directory, so ``sys.argv[0]`` names where this install actually lives — the
+    one place a self-update may write. Returns ``None`` when the process did not
+    start from that script (``python -m issuebot``, pytest, an embedded call),
+    because then there is no install location to pin.
+
+    The path is made absolute but not resolved: a bin directory of symlinks is
+    the normal layout, and following them leads out of the bin directory.
+    """
+    argv0 = Path(sys.argv[0])
+    if argv0.name != "issuebot":
+        return None
+    return Path(os.path.abspath(argv0)).parent
