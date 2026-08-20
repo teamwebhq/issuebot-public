@@ -4,6 +4,7 @@ and processes its claimable tasks serially, skipping work for other boards."""
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import threading
 import time
 from pathlib import Path
@@ -209,6 +210,43 @@ def test_listener_maps_non_done_outcome_status_to_failed_release() -> None:
     listener._process(item)
 
     assert api.releases == [{"run_id": "r1", "status": "failed", "note": "aborted"}]
+
+
+def test_a_failed_run_tells_the_board_why() -> None:
+    """A run that fails before its agent launches — a clone that cannot
+    authenticate, a workspace that will not prepare — produces no agent
+    comment, because no agent ever ran. The runner has to say so itself, or
+    the task goes silent and the person who filed it is left watching an
+    assignment that never comes back."""
+    ex = StubEnvironment(Response(status="failed", result_text="workspace prep failed"))
+    item = _work_item()
+    api = ScriptedApi(item)
+    listener = ProjectListener(wiring(_PROJECT, api=api, environment=ex))
+
+    listener._process(item)
+
+    assert [body for _, body in api.comments if "workspace prep failed" in body]
+    assert api.releases[0]["status"] == "failed"
+
+
+def test_work_for_another_repository_is_refused_and_said_so() -> None:
+    """The connection is configured for one repository; the board hands it a
+    task belonging to another. Running it anyway would commit to a branch on
+    the wrong repository and open a PR that never appears on this task — so the
+    run fails before a workspace is prepared, and the task is told which two
+    URLs disagree."""
+    item = _work_item()
+    item = dataclasses.replace(item, repo="https://github.com/acme/other.git")
+    api = ScriptedApi(item)
+    conn = connection(folder=None, repo="https://github.com/acme/web.git", git_init="branch")
+    listener = ProjectListener(wiring(conn, api=api, environment=StubEnvironment()))
+
+    listener._process(item)
+
+    said = " ".join(body for _, body in api.comments)
+    assert "acme/other.git" in said
+    assert "acme/web.git" in said
+    assert api.releases[0]["status"] == "failed"
 
 
 def test_a_handoff_decision_is_applied_before_the_claim_is_released() -> None:
@@ -521,23 +559,6 @@ def test_listener_snapshot_records_ref_while_working() -> None:
     assert seen[0].ref == "ISS-1"
     assert listener.snapshot().phase == "idle"
     assert listener.snapshot().ref is None
-
-
-def test_snapshot_target_follows_a_repo_correction() -> None:
-    """`Wiring.sync_repo` can correct the connection's `repo` from its linked
-    project mid-lifetime, so the snapshot reads the target per call rather
-    than caching it when the listener is built."""
-    conn = connection(folder=None, repo="ssh://old.git", git_init="branch")
-    wired = wiring(conn, api=ScriptedApi(_work_item()), environment=StubEnvironment())
-    listener = ProjectListener(wired)
-
-    assert listener.snapshot().target == "ssh://old.git"
-
-    # The same in-memory correction `sync_repo` lands: `repo` is an
-    # extra=allow field on the wiring's own connection copy.
-    wired.connection.repo = "ssh://new.git"  # ty: ignore[unresolved-attribute]
-
-    assert listener.snapshot().target == "ssh://new.git"
 
 
 def test_supervisor_writes_status_file(tmp_path: Path) -> None:
@@ -1251,73 +1272,6 @@ def test_supervisor_leaves_an_unchanged_connection_alone(tmp_path: Path) -> None
 
         assert sup._listeners["a"] is listener  # noqa: SLF001 - same object, never restarted
         assert ("disconnect", "b-a") not in api.calls
-    finally:
-        sup.stop()
-
-
-class _RepoSyncApi(RecordingApi):
-    """A RecordingApi whose board/project lookups answer with a linked project
-    repo, so a listener's own source really corrects the connection's `repo`."""
-
-    def __init__(self, project_repo: str) -> None:
-        super().__init__()
-        self._repo = project_repo
-
-    def get_board(self, board_id: str) -> dict[str, Any]:
-        """The board, linked to one project."""
-        return {"id": board_id, "project_id": "proj-1"}
-
-    def get_project(self, project_id: str) -> dict[str, Any]:
-        """The project, carrying the repo the sync corrects toward."""
-        return {"id": project_id, "github_repo": {"ssh_url": self._repo}}
-
-
-def test_a_repo_sync_does_not_read_as_a_config_edit(tmp_path: Path) -> None:
-    """A run's repo sync corrects the connection in memory only. The Supervisor
-    spots edits by comparing its stored connection against a fresh parse of the
-    config file — so a correction landing on that stored instance made any later
-    touch of an *unchanged* file read as an edit, stop the listener, and abort
-    whatever it was running."""
-    from issuebot.config import conn_setting
-    from issuebot.runner import Supervisor
-
-    cfg = _config_with(
-        [
-            connection(
-                name="a",
-                board="b-a",
-                folder=None,
-                repo="git@github.com:acme/OLD.git",
-                git_init="branch",
-            )
-        ]
-    )
-    cfg_path = tmp_path / "config.toml"
-    save_config(cfg, cfg_path)
-
-    api = _RepoSyncApi("git@github.com:acme/NEW.git")
-    sup = Supervisor(api, FakeHarness(0), cfg_path, poll_interval=0.05)
-    sup.start()
-    try:
-        assert _wait(lambda: "b-a" in sup.active_boards(), 2.0)
-        listener = sup._listeners["a"]  # noqa: SLF001 - identity check
-
-        # What the start of every run does, on the listener's own source.
-        listener._source.sync_repo()  # noqa: SLF001
-
-        # The correction is visible to the run's own machinery...
-        assert (
-            conn_setting(listener._project, "repo")  # noqa: SLF001
-            == "git@github.com:acme/NEW.git"
-        )
-
-        # ...but a touch of the (unchanged) config file is not an edit.
-        save_config(cfg, cfg_path)
-        time.sleep(0.5)  # let the watcher see the new mtime and reconcile
-
-        assert sup._listeners["a"] is listener, (  # noqa: SLF001
-            "a repo sync made an unchanged config read as an edited connection"
-        )
     finally:
         sup.stop()
 

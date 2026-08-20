@@ -61,6 +61,17 @@ if TYPE_CHECKING:
 
 DivergenceKind = Literal["branch", "base"]
 
+# How a workspace authenticates an HTTPS GitHub remote: through the ``gh`` CLI,
+# which every run environment already holds a credential for (a Railway sandbox
+# is given ``GH_TOKEN`` and nothing else). git reads no such variable of its
+# own, so without this a clone of a private repo asks for a password nobody is
+# there to type.
+#
+# Set on each clone rather than in the user's global git config — issuebot owns
+# the workspaces it cuts, not the machine they sit on — and scoped to
+# github.com, so a remote on another host keeps whatever it already uses.
+GH_CREDENTIAL_CONFIG = "credential.https://github.com.helper=!gh auth git-credential"
+
 
 class GitError(RuntimeError):
     """A git or ``gh`` step failed."""
@@ -444,14 +455,13 @@ def source_repo_folder(project: Connection, clone_root: str | None) -> str:
 def _sync_origin(g: Git, repo: str) -> None:
     """Repoint ``origin`` at ``repo`` when this clone's own remote has drifted.
 
-    A connection's `repo` can be corrected against its linked Parade project
-    at the start of a run (`runner.Wiring.sync_repo`) — but that
-    correction only lands on the in-memory `Connection`. The physical clone on
-    disk, keyed by `project.key` under a persistent state directory, keeps
-    whatever remote it was created with until something tells git otherwise:
-    left alone, every fetch, push and pull request after the correction would
-    keep hitting the old repository while the in-memory correction reports
-    success. Every caller of `_working_copy` that reuses an existing clone —
+    A connection's `repo` can change under a clone that already exists — the
+    config was edited, or the connection was reconnected to a project that had
+    been relinked. The physical clone on disk, keyed by `project.key` under a
+    persistent state directory, keeps whatever remote it was created with until
+    something tells git otherwise: left alone, every fetch, push and pull
+    request would keep hitting the old repository while the config says
+    otherwise. Every caller of `_working_copy` that reuses an existing clone —
     including the worktree strategy's one shared clone — routes through here
     before its fetch, so a drifted repo is corrected first.
 
@@ -507,12 +517,25 @@ def _working_copy(
         if not (path / ".git").exists():
             raise GitError(f"workspace path exists but is not a git clone: {path}")
         _sync_origin(here, repo)
+        _use_gh_credentials(here)
         here.check("fetch", "fetch", "origin")
     else:
         private_dir(path.parent)
-        Git(path.parent, proc).check("clone", "clone", repo, str(path))
+        Git(path.parent, proc).check("clone", "clone", "-c", GH_CREDENTIAL_CONFIG, repo, str(path))
 
     return str(path)
+
+
+def _use_gh_credentials(g: Git) -> None:
+    """Point this clone's git at ``gh``'s credential store.
+
+    The reuse branch's half of what cloning does with
+    :data:`GH_CREDENTIAL_CONFIG`: a workspace has to authenticate the same way
+    whether this run cut it or an earlier one did. Idempotent, and failure is
+    not fatal — a clone that already authenticates some other way keeps
+    working.
+    """
+    g.git("config", "--local", *GH_CREDENTIAL_CONFIG.split("=", 1))
 
 
 def _start_point(g: Git, project: Connection, branch: str) -> str | None:

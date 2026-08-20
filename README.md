@@ -367,7 +367,7 @@ Use `--set` for plugin connection settings that do not have flags:
 
 ```sh
 issuebot connect --name web --board <board-id> \
-  --repo git@github.com:org/web.git --isolation branch \
+  --repo https://github.com/org/web.git --isolation branch \
   --executor railway \
   --set railway.environment_id=<env-id> \
   --set railway.token=<token> \
@@ -431,15 +431,26 @@ Set one of these working-copy source keys:
 
 - `folder = "/path/to/repo"` — issuebot uses this folder and does not clone it.
   For a git workspace, this folder must be a git repository.
-- `repo = "git@github.com:org/x.git"` — issuebot clones this URL. With
+- `repo = "https://github.com/org/x.git"` — issuebot clones this URL. With
   `git_init = "branch"` or no `git_init`, it keeps one clone for each task. The
-  clone root is `<state dir>/clones` or `[git] clone_root`.
+  clone root is `<state dir>/clones` or `[git] clone_root`. Use an HTTPS URL
+  for a GitHub repository: issuebot gives each clone the `gh` CLI as its
+  credential helper, and `gh` is the only GitHub credential an executor holds.
+  An SSH URL needs a key and a known-hosts entry that an executor does not get.
 
 With `repo` and `git_init = "worktree"`, issuebot keeps one clone for all task
 worktrees. It makes the task worktree in `<state dir>/worktrees` or
 `[git] worktree_root`.
 
 If you set the two source keys, issuebot does not load the configuration.
+
+The board sends the repository of each task's project with the task. If that
+repository is not the `repo` of the connection, issuebot fails the run and puts
+both URLs on the task. It does not change the configuration. Set `repo` to the
+repository of the project, or connect the project to the correct repository.
+
+issuebot makes no check for a connection with a `folder`, or for a task whose
+project has no repository.
 
 Use `git_init` to select the git preparation:
 
@@ -707,7 +718,7 @@ pat = "ib_pat_xxx"
 name = "web"
 board = "board-1"
 executor = "railway"
-repo = "git@github.com:org/web.git"
+repo = "https://github.com/org/web.git"
 git_init = "branch"
 done = "review"
 sinks = ["github"]

@@ -401,25 +401,21 @@ def test_the_worker_launches_the_prompt_its_source_rendered(tmp_path, wire, wire
 
 
 # ---------------------------------------------------------------------------
-# The repo the linked project supplies
+# The repo the connection is configured with
 # ---------------------------------------------------------------------------
 #
-# A sandboxed connection can set no `repo` of its own: the wizard takes it from
-# the board's linked project, and `sync_repo` keeps it true afterwards. The
-# workspace is *selected* by which keys the connection sets, so the sync must
-# land before the selection — synced later, such a connection resolves to the
-# unconfigured workspace and the run never touches the repo.
+# The workspace is *selected* by which keys the connection sets, and the
+# sandbox worker rebuilds its wiring per run from the config it booted with —
+# so a connection whose `repo` never reached the config file resolves to the
+# unconfigured workspace and the run never touches the repository.
+
+
+REPO = "https://github.com/acme/web.git"
 
 
 class _LinkedProjectApi(FakeApi):
-    """FakeApi plus the two lookups `sync_repo` makes: a board linked to a
-    project that carries the repo."""
-
-    def get_board(self, board_id: str) -> dict:
-        return {"id": board_id, "project_id": "proj-1"}
-
-    def get_project(self, project_id: str) -> dict:
-        return {"id": project_id, "github_repo": {"ssh_url": "git@github.com:acme/web.git"}}
+    """A board whose work items name the repository their project is linked
+    to — what every runner-side repo decision now reads."""
 
 
 @pytest.fixture
@@ -427,8 +423,8 @@ def assembled(monkeypatch: pytest.MonkeyPatch) -> dict:
     """Run `run_work` for real up to the environment, and capture the assembly.
 
     The environment is the one stub: a real one would clone the (fake) repo.
-    Everything before it — `wire`, the sync, `job_for` — runs unpatched, which
-    is the subject here."""
+    Everything before it — `wire` and `job_for` — runs unpatched, which is the
+    subject here."""
     seen: dict = {}
 
     class _Env:
@@ -450,7 +446,7 @@ def _run_work(conn: Connection, seen: dict) -> dict:
         _LinkedProjectApi(),
         FakeHarness(),
         conn,
-        WorkItem(task_id="t1", reference="ISS-1"),
+        WorkItem(task_id="t1", reference="ISS-1", repo=REPO),
         run_id="R1",
         ctx=ctx(),
         reporter=ConsoleReporter(ref="ISS-1"),
@@ -458,24 +454,25 @@ def _run_work(conn: Connection, seen: dict) -> dict:
     return seen
 
 
-def test_a_repo_from_the_linked_project_selects_the_git_workspace(assembled):
-    """A connection with no workspace keys at all, on a board whose project
-    supplies the repo: the sync lands the `repo` key before the workspace is
-    selected, so the run gets the workspace that can derive changes — asserted
-    by capability (`produces`), never by a plugin's name."""
-    conn = Connection.model_validate({"name": "parade", "board": "b"})
+def test_a_configured_repo_selects_the_git_workspace(assembled):
+    """A connection whose `repo` is in the config gets the workspace that can
+    derive changes — asserted by capability (`produces`), never by a plugin's
+    name."""
+    conn = Connection.model_validate({"name": "parade", "board": "b", "repo": REPO})
 
     seen = _run_work(conn, assembled)
 
     wiring = seen["wiring"]
     assert "changes" in wiring.workspace.produces
-    assert conn_setting(wiring.connection, "repo") == "git@github.com:acme/web.git"
+    assert conn_setting(wiring.connection, "repo") == REPO
 
 
-def test_a_task_branch_connection_without_its_own_repo_keeps_the_changes_permit(assembled):
-    """The sandbox worker pushes: a connection that cuts a task branch but takes
-    its `repo` from the linked project still holds the `changes` permit."""
-    conn = Connection.model_validate({"name": "parade", "board": "b", "git_init": "branch"})
+def test_a_task_branch_connection_keeps_the_changes_permit(assembled):
+    """The sandbox worker pushes: a connection that cuts a task branch holds
+    the `changes` permit."""
+    conn = Connection.model_validate(
+        {"name": "parade", "board": "b", "repo": REPO, "git_init": "branch"}
+    )
 
     seen = _run_work(conn, assembled)
 

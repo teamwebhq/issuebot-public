@@ -68,9 +68,6 @@ def run_work(
     choice is the sandbox this process is already inside, so
     :func:`runner.in_process_environment` overrides it.
     """
-    # `wire` makes the repo sync itself, before it selects the workspace — so
-    # the sandbox, which rebuilds its wiring fresh from the config it booted
-    # with, makes that check here rather than trust the controller made it.
     wiring = runner.wire(
         client,
         harness,
@@ -79,6 +76,11 @@ def run_work(
         environment_name=runner.in_process_environment(),
     )
 
+    # ponytail: the repo check inside `job_for` is a no-op here — the sandbox
+    # rebuilds the work item from the wire (`WorkerEnv.work_item`), which
+    # carries no `repo`. It does not need to fire: the controller checks before
+    # it ever launches a sandbox, so a mismatched task never gets this far. Put
+    # `repo` on the wire if the two sides can ever hold different configs.
     job = runner.job_for(work, wiring, run_id=run_id)
 
     environment = wiring.environment

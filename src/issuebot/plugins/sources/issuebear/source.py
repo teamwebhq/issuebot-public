@@ -61,8 +61,6 @@ class _Client(Protocol):
     def add_comment(self, task_id: str, body: str) -> dict[str, Any]: ...
     def update_task(self, task_id: str, **fields: Any) -> dict[str, Any]: ...
     def heartbeat(self, run_id: str) -> None: ...
-    def get_board(self, board_id: str) -> dict[str, Any]: ...
-    def get_project(self, project_id: str) -> dict[str, Any]: ...
 
 
 class Issuebear(Source):
@@ -148,71 +146,6 @@ class Issuebear(Source):
         harness happens to offer such a registration."""
         settings = global_settings(cfg, plugins.get("sources", cls.name))
         return cls.board_mcp(mcp_url=settings.mcp_url, pat=settings.pat)
-
-    # -- keeping the connection's repo in step with the project --------------
-
-    def connection_repo(self) -> str | None:
-        """This connection's `repo` setting, as currently held in memory."""
-        return conn_setting(self._connection, "repo")
-
-    def sync_repo(self) -> str | None:
-        """The project's repository, correcting the connection if it drifted.
-
-        The wizard takes the repo from the project at connect time (so a
-        project with one is never asked); this keeps that true afterwards, for
-        a connection whose config was hand-edited or whose project was relinked
-        in Parade since. The project wins outright — there is no override — a
-        connection working a different repo than the project it reads tasks
-        from produces PRs that never surface on those tasks, which looks
-        exactly like the feature silently not working. Called by
-        ``runner.wire`` before the workspace is selected, and again by the
-        listener at the start of every run, so a correction lands before
-        ``workspace.prepare`` reads ``repo`` off this same connection object.
-
-        Returns None, changing nothing, when the project names no repo (an
-        unlinked project says nothing about it — it must not clear a value
-        configured by hand before linking existed) or when the board server
-        cannot be reached (an older server, a network blip). A repo check is
-        not worth failing a run over: the branch and PR still work, they are
-        just not verified against the project this run.
-        """
-        try:
-            board = self._client.get_board(self._board)
-            project = self._client.get_project(str(board["project_id"]))
-        except Exception as exc:  # noqa: BLE001 - network, auth, or an older board server
-            logger.debug("could not verify the connection's repo against its project: %s", exc)
-            return None
-
-        repo = (project.get("github_repo") or {}).get("ssh_url")
-        if not repo:
-            return None
-
-        if self.connection_repo() != repo:
-            logger.info("connection repo corrected to %s (from its linked project)", repo)
-            self._set_connection_repo(repo)
-
-        return repo
-
-    def _set_connection_repo(self, repo: str) -> None:
-        """Correct `repo` on the live `Connection` this source was built with.
-
-        In memory only. Nothing in this module persists a `Connection` to
-        disk today — `save_config` needs the whole `Config` (every connection)
-        plus a file path, neither of which a `Source` is ever handed, so
-        writing the file is the caller's business, not a second persistence
-        path invented in here. `sync_repo` is called at the start of every
-        run, so a hand-edited file or a relinked project is corrected again
-        the next time regardless — this only has to be right for the run in
-        progress, which it is: this `Connection` is the run's own copy (see
-        `runner.wire`), the same instance the workspace reads `repo` off
-        moments later. The Supervisor's stored instance is a different object,
-        so this correction never makes an unchanged config file read as an
-        edited connection.
-        """
-        # `repo` is an extra=allow field (owned by the git workspace plugin, not
-        # declared on `Connection` itself) — the same reason reading it goes
-        # through `conn_setting` rather than plain attribute access.
-        self._connection.repo = repo  # ty: ignore[unresolved-attribute]
 
     # -- discover / claim / release -----------------------------------------
 

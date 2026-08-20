@@ -61,6 +61,14 @@ class WorkItem:
     actor_name: str | None = None
     comment_excerpt: str | None = None
 
+    # The repository the item's project is linked to. A connection configured
+    # for a different one is not the connection that should do this work, and
+    # `runner.job_for` refuses the run rather than opening a PR that never
+    # appears on the task. None when the project is unlinked, or when the board
+    # cannot confirm the link — neither says anything about the connection, so
+    # neither is a mismatch.
+    repo: str | None = None
+
     @classmethod
     def from_api(cls, payload: dict[str, Any]) -> WorkItem:
         """Build from a ``/me/work`` payload, ignoring fields we don't model."""
@@ -73,6 +81,7 @@ class WorkItem:
             run_id=payload.get("run_id"),
             actor_name=payload.get("actor_name"),
             comment_excerpt=payload.get("comment_excerpt"),
+            repo=payload.get("repo"),
         )
 
     @property

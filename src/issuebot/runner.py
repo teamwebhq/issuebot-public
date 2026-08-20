@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -54,7 +54,7 @@ from issuebot.config import (
     workspaces_claiming,
 )
 from issuebot.context import RunnerContext
-from issuebot.contracts import Claim, Job, Response, WorkItem
+from issuebot.contracts import Claim, Job, Response, SinkResult, WorkItem
 from issuebot.plugins.base import EnvironmentPlugin, SinkPlugin, WorkspacePlugin
 from issuebot.plugins.environments.base import ExecutionEnvironment
 from issuebot.plugins.harnesses.base import Harness
@@ -237,20 +237,6 @@ def in_process_environment() -> str:
     return running[0]
 
 
-@runtime_checkable
-class _RepoSyncable(Protocol):
-    """A source that can correct its connection's `repo` against its project.
-
-    Structural rather than a method on the `Source` ABC: only issuebear's board
-    has a project to check a repo against today, so this is a capability a
-    source may or may not have — the same pattern as
-    `plugins.sources.base.SandboxLifecycle`, guarded by `isinstance`, absence
-    a clean no-op.
-    """
-
-    def sync_repo(self) -> str | None: ...
-
-
 @dataclass(frozen=True)
 class Wiring:
     """The assembled run machinery for one connection — what :func:`wire` returns.
@@ -294,32 +280,6 @@ class Wiring:
     # that never run one — every `wire` caller gets a built environment.
     environment: ExecutionEnvironment | None = None
 
-    def sync_repo(self) -> None:
-        """Correct the connection's `repo` against its linked project, before
-        anything downstream reads it.
-
-        :func:`wire` makes the first sync itself, before the workspace is even
-        selected. This method is the listener's re-check at the start of every
-        later run, BEFORE the workspace is prepared: a git workspace decides
-        whether to clone by reading `repo` straight off the connection, so a
-        correction landing any later is too late to be read. The sandbox
-        worker needs no call of its own — it rebuilds its `Wiring` per run,
-        through the same :func:`wire`, from the config it booted with.
-
-        The correction lands on this wiring's own copy of the connection
-        (every piece here holds that same copy), never on the instance the
-        Supervisor compares against a fresh parse of the config file — so a
-        later touch of an unchanged file does not read as an edit and restart
-        the listener mid-run.
-
-        A no-op for a source with nothing to check (see `_RepoSyncable`).
-        Never raises: `sync_repo` itself already treats an unreachable board
-        or an unlinked project as "change nothing, this is not worth failing
-        a run over".
-        """
-        if isinstance(self.source, _RepoSyncable):
-            self.source.sync_repo()
-
 
 def environment_for(wiring: Wiring, *, name: str | None = None) -> ExecutionEnvironment:
     """Build the `ExecutionEnvironment` a connection's `executor` setting selects.
@@ -358,14 +318,10 @@ def wire(
 
     The order is the point, and it lives only here:
 
-    1. The connection is copied, so the repo sync corrects a private instance —
-       the one the Supervisor stored to compare configs against stays pristine.
-    2. The source is built first, and the repo sync runs through it before the
-       workspace is selected: `workspace_for` selects by which keys the
-       connection sets, and a connection whose `repo` comes only from its
-       linked project holds that key only after the sync.
-    3. Workspace and sinks are built over that same corrected copy.
-    4. The environment is built last, over the assembled wiring, so it holds
+    1. The connection is copied, so nothing downstream can edit the instance
+       the Supervisor stored to compare configs against.
+    2. Source, then workspace and sinks, over that same copy.
+    3. The environment is built last, over the assembled wiring, so it holds
        the same pieces every run through it reads.
 
     ``environment_name`` overrides the connection's own `executor` choice for
@@ -374,13 +330,6 @@ def wire(
     connection = connection.model_copy()
 
     source = source_for(api, connection, ctx, agent_id=ctx.agent_id, install_id=install_id)
-
-    # The first repo sync, before the workspace is selected (step 2 above).
-    # The listener re-syncs at the start of every later run, through
-    # :meth:`Wiring.sync_repo`; a source with nothing to check is a no-op.
-    if isinstance(source, _RepoSyncable):
-        source.sync_repo()
-
     workspace, workspace_settings = workspace_for(connection, ctx)
     sinks = sinks_for(connection, harness, ctx.plugin_settings)
 
@@ -395,6 +344,46 @@ def wire(
         sinks=sinks,
     )
     return replace(wiring, environment=environment_for(wiring, name=environment_name))
+
+
+class RepoMismatch(RuntimeError):
+    """This connection is configured for a different repository than the task's
+    project is linked to."""
+
+
+def check_repo(connection: Connection, work: WorkItem) -> None:
+    """Refuse work that belongs to a different repository than this connection.
+
+    The board says which repository a task's project is linked to; the config
+    says which one this connection works in. When they disagree, one of the two
+    is wrong and neither this runner nor the board can tell which — the project
+    may have been relinked, or the config edited by hand. Doing the work anyway
+    is the worst of the options: it produces a branch and a PR on the wrong
+    repository, which never surface on the task, so it reads exactly like the
+    agent silently doing nothing.
+
+    Raising is the whole point. `job_for` runs this before there is a workspace
+    to prepare, and the caller turns it into a failed run with this message on
+    the task, so a person sees which two URLs disagree and fixes one of them.
+
+    Two things are not a mismatch, and both mean "nothing to compare":
+
+    * The board sent no repo — the project is unlinked, or the board could not
+      confirm the link with GitHub just now. Neither says anything about this
+      connection.
+    * The connection is configured with a `folder` rather than a `repo`. It
+      works in a checkout that is already on this machine, and the URL that
+      checkout came from is git's business, not the config's.
+    """
+    configured = conn_setting(connection, "repo")
+    if work.repo is None or configured is None:
+        return
+
+    if work.repo != configured:
+        raise RepoMismatch(
+            f"task {work.ref} belongs to {work.repo}, but connection "
+            f"'{connection.name}' is configured for {configured}"
+        )
 
 
 def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
@@ -420,6 +409,8 @@ def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
     """
     ctx = wiring.ctx
     source = wiring.source
+
+    check_repo(wiring.connection, work)
 
     permits = source.permits(work) & wiring.workspace.produces_for(wiring.workspace_settings)
     return Job(
@@ -508,10 +499,8 @@ class ProjectListener:
         status` and server telemetry cannot disagree.
 
         The published "target" (folder, else the workspace's repo) is read per
-        call, not cached at construction: :meth:`Wiring.sync_repo` can correct
-        the connection's `repo` from its linked project mid-lifetime, and a
-        cached value would publish the stale one for the rest of the run.
-        `_board` stays cached — nothing corrects it after construction."""
+        call rather than cached at construction, so a config reloaded under a
+        live listener publishes what it now says. `_board` stays cached."""
         target = self._project.folder or conn_setting(self._project, "repo") or ""
 
         return self._state.snapshot(
@@ -713,7 +702,15 @@ class ProjectListener:
         releasing the claim is not.
         """
         work = job.work
+
+        # A run that ended badly has no outputs to verify and nothing to
+        # deliver — but it still has something to say. The board is where a
+        # person finds out what happened, and a run that failed before its
+        # agent ever launched (a clone that could not authenticate, a
+        # workspace that would not prepare) produced no agent comment at all,
+        # so without this the task simply goes quiet.
         if response.status != "done":
+            self._report(work, response, [])
             return response
 
         # Against the job's own permits, not the source's alone: the run was
@@ -732,10 +729,23 @@ class ProjectListener:
             else:
                 for decision in response.decisions:
                     self._source.apply(work, decision)
+            self._report(work, response, results)
+        except Exception:  # noqa: BLE001 — reporting is best-effort; releasing is not
+            logger.warning("failed to deliver outcome for %s", work.ref, exc_info=True)
+        return response
+
+    def _report(self, work: WorkItem, response: Response, results: list[SinkResult]) -> None:
+        """Tell the board how a run went.
+
+        Best-effort, like every other board call on the way out (see
+        :meth:`_finish`): reporting the outcome must never cost the release
+        that frees the claim, so a board that refuses the comment is logged
+        and no more.
+        """
+        try:
             self._source.finish(work, response, results)
         except Exception:  # noqa: BLE001 — reporting is best-effort; releasing is not
             logger.warning("failed to report outcome for %s", work.ref, exc_info=True)
-        return response
 
     def _run_claimed(self, work: WorkItem, claim: Claim) -> None:
         """Run one claimed work item to completion and release its claim.
@@ -767,17 +777,16 @@ class ProjectListener:
         self._state.set_phase("working", work.ref)
         try:
             try:
-                # Before this connection's own workspace is prepared, not
-                # after — the ordering (and why it only touches this wiring's
-                # own copy of the connection) is `Wiring.sync_repo`'s own story.
-                self._wiring.sync_repo()
+                # Raises `RepoMismatch` when the board's repository for this
+                # task is not the one this connection is configured for — the
+                # except below turns that into a failed run the board is told
+                # about, before any workspace is prepared.
                 job = job_for(work, self._wiring, run_id=run_id)
             except Exception as exc:  # noqa: BLE001 - a claim must never be stranded
                 logger.exception("could not build a job for %s", work.ref)
-                self._safe_release(
-                    claim,
-                    Response(status="failed", result_text=f"could not prepare the run: {exc}"),
-                )
+                failed = Response(status="failed", result_text=f"could not prepare the run: {exc}")
+                self._report(work, failed, [])
+                self._safe_release(claim, failed)
                 return
             response = self._execute(job, cancel)
             self._safe_release(claim, self._finish(job, response))

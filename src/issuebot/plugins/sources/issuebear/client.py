@@ -17,10 +17,25 @@ from issuebot.plugins.sources.base import ConnectionConflict
 if TYPE_CHECKING:
     from issuebot.agent_state import ConnectionSnapshot
 
-__all__ = ["AlreadyClaimed", "ApiError", "ConnectionConflict", "IssuebotClient"]
+__all__ = ["AlreadyClaimed", "ApiError", "ConnectionConflict", "IssuebotClient", "project_repo"]
 
 # Sentinel distinguishing "body wasn't valid JSON" from a legitimate ``None`` body.
 _UNPARSEABLE = object()
+
+
+def project_repo(project: dict[str, Any]) -> str | None:
+    """The HTTPS clone URL of the repository a project is linked to, if any.
+
+    ``clone_url`` only. Every run environment is given GitHub credentials for
+    the ``gh`` CLI, which authenticates an HTTPS remote; none of them is given
+    an SSH key or a known-hosts entry, so ``ssh_url`` names a remote that
+    cannot be cloned. A Railway sandbox holds ``GH_TOKEN`` and nothing else.
+
+    A board server that sends no ``clone_url`` reads the same as 'not linked':
+    the connection keeps whatever repo it was configured with, and the wizard
+    asks.
+    """
+    return (project.get("github_repo") or {}).get("clone_url") or None
 
 
 def _now_iso() -> str:

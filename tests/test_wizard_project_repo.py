@@ -45,7 +45,7 @@ def test_connection_carries_the_projects_repo():
 
     result = source_wizard.connection(_Client(project), choose=_choose_first)
 
-    assert result["repo"] == "git@github.com:acme/web.git"
+    assert result["repo"] == "https://github.com/acme/web.git"
     assert result["board"] == "board-1"
 
 
@@ -86,3 +86,18 @@ def test_core_falls_back_to_asking_when_the_project_has_no_repo(monkeypatch):
     prompt = core._repo_prompter(None)
 
     assert prompt() == "git@github.com:acme/typed.git"
+
+
+def test_connection_reports_no_repo_when_the_project_names_only_ssh():
+    """A run environment holds gh credentials and nothing else — no SSH key,
+    no known-hosts entry — so an SSH URL is not a remote it can clone. Better
+    to ask than to configure a connection that fails at the clone."""
+    project = {
+        "id": "proj-1",
+        "name": "Web",
+        "github_repo": {"ssh_url": "git@github.com:acme/web.git"},
+    }
+
+    result = source_wizard.connection(_Client(project), choose=_choose_first)
+
+    assert result["repo"] is None

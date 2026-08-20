@@ -32,6 +32,7 @@ from typing import Any, get_args
 
 import typer
 
+from issuebot.plugins.sources.issuebear.client import project_repo
 from issuebot.plugins.sources.issuebear.discovery import DiscoveryError, discover
 from issuebot.plugins.sources.issuebear.settings import ConfirmChoice, DoneMode, Mode
 
@@ -107,18 +108,6 @@ def suggest_name(board_name: str, project_name: str = "") -> str:
     return slug or "connection"
 
 
-def _project_repo(project: dict[str, Any]) -> str | None:
-    """The clone URL of the repository this project is linked to, if any.
-
-    The board server resolves the repo to real URLs for us, so nothing here has
-    to know GitHub's URL shapes — which is also what lets a self-hosted forge
-    answer this key one day without touching this function. A board server that
-    predates the GitHub connector sends no key at all, which reads the same as
-    'not linked'."""
-    repo = project.get("github_repo") or {}
-    return repo.get("ssh_url") or None
-
-
 def connection(client: Any, *, choose: Chooser) -> dict[str, Any]:
     """Walk organisation → project → board and return what identifies the
     connection: the ``board`` it reads, a ``name`` to suggest for it, and the
@@ -139,7 +128,7 @@ def connection(client: Any, *, choose: Chooser) -> dict[str, Any]:
         # The repository the project is attached to, or None to let core ask.
         # The project's answer is final: a connection pointed at a different
         # repo would raise PRs that never appear on the tasks it works.
-        "repo": _project_repo(project),
+        "repo": project_repo(project),
     }
 
 
