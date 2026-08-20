@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import textwrap
 from typing import TYPE_CHECKING, ClassVar
 
 from issuebot.contracts import Changed, SinkResult
@@ -55,6 +56,30 @@ _HOST = re.compile(r"^(?:[a-z][a-z0-9+.-]*://[^/]+/|[^/@]+@[^:/]+:)", re.IGNOREC
 def _capped(text: str, limit: int = _MAX_DIFF_BYTES) -> str:
     """Truncate a diff too large to hand to a model, marking the cut."""
     return text if len(text) <= limit else text[:limit] + "\n…(diff truncated)…"
+
+
+def _titled(ref: str, title: str) -> str:
+    """``"{ref}: {title}"``, with a ref the writer already put in front removed.
+
+    Both paths into a PR title route through here. The model is told not to
+    prefix the ref and slips anyway, and the mechanical path's text is the
+    agent's own summary, whose first line normally *does* start with the ref —
+    so prefixing unconditionally gives the reviewer ``ISS-42: ISS-42: …``. One
+    helper on both paths means that cannot happen on either.
+    """
+    text = title.strip()
+    if text.lower().startswith(ref.lower()):
+        # Drop the ref, then whatever separated it from the real title.
+        text = text[len(ref) :].lstrip(":- \t")
+
+    # Cap what is left, not the raw line: capping first spends the budget on a
+    # ref that is about to be stripped, so the title lost its tail for nothing
+    # ("…closes any live agen"). `shorten` cuts back to a whole word.
+    budget = 72 - len(ref) - len(": ")
+    if budget > 0 and len(text) > budget:
+        text = textwrap.shorten(text, width=budget, placeholder="")
+
+    return f"{ref}: {text}"
 
 
 def _slug(url: str) -> str:
@@ -183,14 +208,25 @@ def _describe(
                 exc_info=True,
             )
         else:
-            if text:
-                title, _, body = text.partition("\n")
-                if title.strip():
-                    return f"{ref}: {title.strip()}", (body.strip() or summary)
+            title, _, body = text.partition("\n")
+            if title.strip():
+                return _titled(ref, title), (body.strip() or summary)
 
-    mechanical_title = summary.strip().splitlines()[0][:72] if summary.strip() else ref
-    mechanical_body = "\n\n".join(filter(None, [summary.strip(), changes.stat.strip()]))
-    return f"{ref}: {mechanical_title}", (mechanical_body or summary)
+            # The call worked but gave back nothing usable. The mechanical
+            # description below still opens the PR; it must not do so silently.
+            logger.warning(
+                "PR summary for %s came back unusable; using a mechanical description", ref
+            )
+
+    mechanical_title = summary.strip().splitlines()[0] if summary.strip() else ref
+
+    # Markdown, so the diffstat renders as a diffstat rather than one mangled
+    # line: the agent's summary as the opening paragraph, then the stat fenced.
+    stat = changes.stat.strip()
+    parts = [summary.strip(), f"## Changes\n\n```\n{stat}\n```" if stat else ""]
+    mechanical_body = "\n\n".join(filter(None, parts))
+
+    return _titled(ref, mechanical_title), (mechanical_body or summary)
 
 
 class GitHubSink(Sink):

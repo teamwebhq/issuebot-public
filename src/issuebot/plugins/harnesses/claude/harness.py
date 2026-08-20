@@ -188,5 +188,19 @@ class ClaudeHarness(Harness):
         if model:
             argv += ["--model", model]
         out: list[str] = []
-        self._proc.spawn(argv, on_line=out.append, cwd=folder)
-        return "\n".join(out).strip()
+        code = self._proc.spawn(argv, on_line=out.append, cwd=folder)
+        text = "\n".join(out).strip()
+
+        # An empty answer here is the caller's cue to fall back to a mechanical
+        # PR description, and that fallback used to happen in total silence.
+        # Say why it is about to happen, naming the command and the exit code,
+        # so the next one is diagnosable from the log alone.
+        if code != 0 or not text:
+            logger.warning(
+                "PR summary command %r exited %s and returned %s characters of text",
+                self._command,
+                code,
+                len(text),
+            )
+
+        return text

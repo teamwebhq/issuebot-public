@@ -35,9 +35,10 @@ def _delivery(
     summary: str = "did the thing",
     repo: str = "https://github.com/o/r.git",
     folder: str = "/repo",
+    ref: str = "ISS-1",
 ) -> Delivery:
     return Delivery(
-        work=work(),
+        work=work(reference=ref),
         output=Changed(summary=summary),
         changes=_changes() if changes is _DEFAULT_CHANGES else changes,  # type: ignore[arg-type]
         repo=repo,
@@ -318,6 +319,72 @@ def test_falls_back_to_a_mechanical_description_when_the_harness_says_nothing() 
     assert result.ok
     create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
     assert "the fallback text" in create[create.index("--title") + 1]
+
+
+def test_a_mechanical_title_does_not_repeat_a_ref_the_agent_already_wrote() -> None:
+    """The agent's own change summary normally opens with the reference, so
+    prefixing it again hands the reviewer `ISS-152: ISS-152: ...`."""
+    proc = _happy()
+
+    result = GitHubSink(proc=proc).deliver(
+        _delivery(ref="ISS-152", summary="ISS-152: remove_member now closes live agents")
+    )
+
+    assert result.ok
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    title = create[create.index("--title") + 1]
+    assert title.count("ISS-152") == 1
+    assert title == "ISS-152: remove_member now closes live agents"
+
+
+def test_a_long_mechanical_title_is_cut_back_to_a_whole_word() -> None:
+    """The 72-character budget is measured after the duplicate ref is gone —
+    spending it on a ref that is then stripped is what truncated the reported
+    PR mid-word ("...closes any live agen")."""
+    proc = _happy()
+    summary = (
+        "ISS-152: remove_member (api/routers/members.py) now closes any live "
+        "agent sessions belonging to the removed member"
+    )
+
+    result = GitHubSink(proc=proc).deliver(_delivery(ref="ISS-152", summary=summary))
+
+    assert result.ok
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    title = create[create.index("--title") + 1]
+    assert len(title) <= 72
+    assert title.count("ISS-152") == 1
+    # Every word kept is a whole word from the summary, so nothing ends mid-word.
+    words = summary.removeprefix("ISS-152:").split()
+    assert title.removeprefix("ISS-152: ").split() == words[: len(title.split()) - 1]
+
+
+def test_a_model_title_that_repeats_the_ref_is_not_prefixed_twice() -> None:
+    """The summarizer is told not to write the ref and sometimes does anyway."""
+    proc = _happy(**{"git diff": completed(out="--- a\n+++ b\n")})
+    harness = FakeHarness(summary="ISS-152 - Add the widget\n\nBecause it was missing.")
+
+    result = GitHubSink(harness=harness, proc=proc).deliver(_delivery(ref="ISS-152"))
+
+    assert result.ok
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    title = create[create.index("--title") + 1]
+    assert title.count("ISS-152") == 1
+    assert title == "ISS-152: Add the widget"
+
+
+def test_the_mechanical_body_fences_the_diffstat_under_a_changes_heading() -> None:
+    """A bare stat renders as one mangled line; fenced, it reads as a diffstat."""
+    proc = _happy()
+    changes = _changes(stat="api/routers/members.py | 12 ++++---\n1 file changed")
+
+    result = GitHubSink(proc=proc).deliver(_delivery(changes=changes, summary="fixed the thing"))
+
+    assert result.ok
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    body = create[create.index("--body") + 1]
+    assert body.startswith("fixed the thing")
+    assert "## Changes\n\n```\napi/routers/members.py | 12 ++++---\n1 file changed\n```" in body
 
 
 def test_it_declares_that_it_needs_a_pushed_branch() -> None:
