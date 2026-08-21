@@ -46,8 +46,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger("issuebot")
 
 # A diff too large to hand a summarizer model is truncated rather than sent
-# whole.
-_MAX_DIFF_BYTES = 20000
+# whole. ~200KB is about 50k tokens, which every summarizer model this sink can
+# use reads comfortably — a cut diff makes the model write about half a change,
+# so the cap sits well above the diff of an ordinary task.
+_MAX_DIFF_BYTES = 200_000
 
 # Everything up to and including the host, in the two forms git writes a remote:
 # `scheme://[user@]host/` and `user@host:`. What follows is the repository path.

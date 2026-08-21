@@ -27,7 +27,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from issuebot.release import install_bin_dir, installer_argv
-from issuebot.transient import log_poll_failure
+from issuebot.transient import log_poll_failure, log_poll_recovered
 
 logger = logging.getLogger("issuebot")
 
@@ -125,6 +125,23 @@ def _default_run_update() -> None:
     logger.info("installer output:\n%s", ((done.stdout or "") + (done.stderr or "")).strip())
 
 
+def _ack(
+    client: _CommandClient, command_id: str, *, status: str, result: str | None = None
+) -> None:
+    """Ack a command to the board, logging a failure instead of raising it.
+
+    The ack is a report, never a gate. It is a board HTTP call, and the update
+    being installed is often the very deploy that takes the board down — so a
+    board that cannot hear the ack must not change what the runner does: an
+    update that already installed still relaunches, and restart, the only lever
+    on a stuck runner, still works.
+    """
+    try:
+        client.ack_command(command_id, status=status, result=result)
+    except Exception:  # noqa: BLE001 — reporting must never steer the runner
+        logger.warning("could not ack command %s as %s", command_id, status, exc_info=True)
+
+
 def run_command_loop(
     client: _CommandClient,
     *,
@@ -152,12 +169,18 @@ def run_command_loop(
             transient_fails = log_poll_failure(logger, "Command API", exc, transient_fails)
             stop.wait(3)
             continue
-        transient_fails = 0
+        transient_fails = log_poll_recovered(logger, "Command API", transient_fails)
 
         for command in commands:
             if stop.is_set():
                 return
-            _handle(command, client, listeners, relaunch, run_update, drain_timeout)
+            try:
+                _handle(command, client, listeners, relaunch, run_update, drain_timeout)
+            except Exception:  # noqa: BLE001 — one bad command must not deafen the runner
+                # Without this, any unexpected failure ends the command thread
+                # for the life of the process, and every later restart/update
+                # from the board is silently ignored.
+                logger.warning("command %r failed", command.get("id"), exc_info=True)
 
 
 def _handle(
@@ -174,7 +197,7 @@ def _handle(
 
     if kind == "restart":
         # Ack BEFORE stopping listeners so the server knows we received it.
-        client.ack_command(command_id, status="done", result="restarting")
+        _ack(client, command_id, status="done", result="restarting")
 
         for listener in listeners:
             listener.stop()  # abort any in-flight agent
@@ -188,32 +211,37 @@ def _handle(
         # which would stop at the first False and leave the rest still claiming).
         drained = [listener.hold(drain_timeout) for listener in listeners]
 
-        if not all(drained):
-            # Refuse rather than update over live work. An update that does not
-            # land is an inconvenience — the next one will, or the user runs the
-            # installer by hand — while an update that lands on top of a running
-            # task destroys work that cannot be got back.
-            for listener in listeners:
-                listener.resume()
-            problem = f"work still in flight after {drain_timeout:.0f}s; did not update"
-            logger.warning(problem)
-            client.ack_command(command_id, status="failed", result=problem)
-            return
-
+        # The hold takes every concurrency permit and only resume() gives them
+        # back, so every path from here that leaves this process running has to
+        # resume — a held runner that never relaunches looks alive, claims
+        # nothing and logs nothing. `relaunch()` replaces the process, so this
+        # does not run after an update that lands; if execv itself raises,
+        # resuming is exactly what a still-serving runner needs.
         try:
-            run_update()
-        except Exception as exc:  # noqa: BLE001 — a bad upgrade must not brick the runner
-            logger.warning("update command failed", exc_info=True)
-            # The runner carries on serving on the old code, so it has to start
-            # claiming again — a held runner that never relaunches is one that
-            # looks alive and takes no work.
+            if not all(drained):
+                # Refuse rather than update over live work. An update that does
+                # not land is an inconvenience — the next one will, or the user
+                # runs the installer by hand — while an update that lands on top
+                # of a running task destroys work that cannot be got back.
+                problem = f"work still in flight after {drain_timeout:.0f}s; did not update"
+                logger.warning(problem)
+                _ack(client, command_id, status="failed", result=problem)
+                return
+
+            try:
+                run_update()
+            except Exception as exc:  # noqa: BLE001 — a bad upgrade must not brick the runner
+                # The runner carries on serving on the old code.
+                logger.warning("update command failed", exc_info=True)
+                _ack(client, command_id, status="failed", result=str(exc))
+                return
+
+            _ack(client, command_id, status="done", result="updated")
+
+            relaunch()
+        finally:
             for listener in listeners:
                 listener.resume()
-            client.ack_command(command_id, status="failed", result=str(exc))
-            return
-
-        client.ack_command(command_id, status="done", result="updated")
-        relaunch()
         return
 
     logger.warning("ignoring unknown command kind: %r", kind)

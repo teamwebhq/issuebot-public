@@ -1593,3 +1593,76 @@ def test_stop_releases_a_listener_waiting_for_a_slot() -> None:
 
     assert not worker.is_alive()
     assert api.claims == []  # never claimed: nothing to strand
+
+
+class StandingWorkApi(ScriptedApi):
+    """A board that delivers nothing, but keeps the item on the standing list.
+
+    What a board level assignment looks like: nothing ever fires a per-task
+    delivery, so the work is only found by asking what is still assigned."""
+
+    def wait_for_work(
+        self, *, timeout: int = 25, board_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        self.wait_board_ids.append(board_id)
+        time.sleep(min(timeout, 0.05))
+        return []
+
+    def get_my_work(self, *, board_id: str | None = None) -> list[dict[str, Any]]:
+        return [self._work_item]
+
+
+class FlakyBoardApi(ScriptedApi):
+    """A board whose first poll fails, and which only lists the work after that.
+
+    The delivery arrived while the board was unreachable, and the board never
+    sends it a second time."""
+
+    def __init__(self, work_item: Any) -> None:
+        super().__init__(work_item)
+        self.failed = False
+
+    def wait_for_work(
+        self, *, timeout: int = 25, board_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        self.wait_board_ids.append(board_id)
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("board is down")
+        time.sleep(min(timeout, 0.05))
+        return []
+
+    def get_my_work(self, *, board_id: str | None = None) -> list[dict[str, Any]]:
+        return [self._work_item] if self.failed else []
+
+
+def test_work_only_on_the_standing_list_is_claimed_and_run() -> None:
+    api = StandingWorkApi(_work_item())
+    listener = ProjectListener(
+        wiring(_PROJECT, api=api, environment=StubEnvironment()),
+        wait_timeout=1,
+    )
+
+    thread = _run_listener(listener)
+    assert api.released.wait(timeout=2), "standing work was never processed"
+    listener.stop()
+    thread.join(timeout=2)
+
+    assert api.claims == ["t1"]
+    assert api.releases == [{"run_id": "r1", "status": "done", "note": None}]
+
+
+def test_standing_work_is_picked_up_once_a_failed_poll_recovers() -> None:
+    api = FlakyBoardApi(_work_item())
+    listener = ProjectListener(
+        wiring(_PROJECT, api=api, environment=StubEnvironment()),
+        wait_timeout=1,
+    )
+
+    thread = _run_listener(listener)
+    # The listener backs off for 3s after a failed poll, so allow for that.
+    assert api.released.wait(timeout=8), "work missed by the delivery was never processed"
+    listener.stop()
+    thread.join(timeout=2)
+
+    assert api.claims == ["t1"]

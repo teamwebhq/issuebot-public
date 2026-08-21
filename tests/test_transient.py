@@ -17,6 +17,7 @@ from issuebot.transient import (
     describe_transient,
     is_transient,
     log_poll_failure,
+    log_poll_recovered,
 )
 
 
@@ -101,3 +102,23 @@ def test_log_poll_failure_non_transient(caplog):
     record = caplog.records[0]
     assert record.levelno == logging.WARNING
     assert record.exc_info is not None
+
+
+def test_log_poll_recovered_after_failures(caplog):
+    logger = logging.getLogger("issuebot.test")
+    with caplog.at_level(logging.INFO, logger="issuebot.test"):
+        result = log_poll_recovered(logger, "Board API", 4)
+
+    assert result == 0
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.INFO
+    assert "back after 4" in caplog.records[0].getMessage()
+
+
+def test_log_poll_recovered_says_nothing_when_healthy(caplog):
+    logger = logging.getLogger("issuebot.test")
+    with caplog.at_level(logging.INFO, logger="issuebot.test"):
+        result = log_poll_recovered(logger, "Board API", 0)
+
+    assert result == 0
+    assert caplog.records == []

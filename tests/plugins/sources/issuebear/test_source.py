@@ -414,3 +414,20 @@ def test_heartbeat_delegates_to_the_client():
     api = FakeApi()
     _source(api).heartbeat("r1")
     assert api.heartbeats == ["r1"]
+
+
+# ---------------------------------------------------------------------------
+# sweep
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_returns_the_standing_work_for_this_board():
+    """The board's delivery channel is one-shot, so the standing list is what
+    finds work no delivery ever offered."""
+    api = FakeApi(work_items=[{"task_id": "t1", "board_id": "b"}])
+    assert [i.task_id for i in _source(api).sweep()] == ["t1"]
+
+
+def test_sweep_filters_out_items_for_another_board():
+    api = FakeApi(work_items=[{"task_id": "t1", "board_id": "OTHER"}])
+    assert _source(api).sweep() == []

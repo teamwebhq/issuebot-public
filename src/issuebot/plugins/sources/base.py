@@ -226,6 +226,18 @@ class Source(ABC):
     def poll(self, *, timeout: int) -> list[WorkItem]:
         """Long-poll for work items waiting on this source."""
 
+    def sweep(self) -> list[WorkItem]:
+        """The standing list of work waiting for this agent, for a source that
+        can answer one.
+
+        Beside :meth:`poll` rather than inside it: a delivery channel says what
+        arrived, this says what is *still* assigned. The runner sweeps on an
+        interval so work a one-shot delivery missed — delivered while the poll
+        loop was erroring, or never delivered per item at all — is found anyway.
+        Concrete with an empty default: a source with only a delivery channel
+        implements nothing and keeps working unchanged."""
+        return []
+
     @abstractmethod
     def claim(self, work: WorkItem) -> Claim | None:
         """Take this work item's lock, or ``None`` if it could not be taken —

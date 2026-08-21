@@ -63,10 +63,21 @@ from issuebot.plugins.workspaces.base import Workspace
 from issuebot.reporter import ConsoleReporter
 from issuebot.sessions import SessionStore
 from issuebot.status import StatusStore, build_payload, default_status_path
-from issuebot.transient import log_poll_failure
+from issuebot.transient import (
+    describe_transient,
+    is_transient,
+    log_poll_failure,
+    log_poll_recovered,
+)
 from issuebot.verify import verify
 
 logger = logging.getLogger("issuebot")
+
+# How often a listener sweeps its source's standing assignment list
+# (`Source.sweep`) alongside the one-shot delivery channel `poll` reads. Work
+# delivered while the poll loop was erroring is never delivered again, so the
+# listener goes and looks for whatever is still assigned to it.
+SWEEP_INTERVAL_SECONDS = 300.0
 
 
 class _ThreadFilter(logging.Filter):
@@ -575,24 +586,78 @@ class ProjectListener:
         if self._max_concurrent > 1:
             self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=self._max_concurrent)
         transient_fails = 0
+
+        # True while the last poll attempt failed, so a recovery can sweep for
+        # whatever the source tried to deliver meanwhile. Separate from
+        # `transient_fails`, which a loud failure resets to zero.
+        poll_failed = False
+
+        # Due immediately, so a listener that has just started — or just been
+        # restarted — picks up whatever is already assigned to it.
+        last_sweep = time.monotonic() - SWEEP_INTERVAL_SECONDS
+
         while not self._stop.is_set():
             # Only report waiting when nothing is actually running: with a pool
             # the poll thread keeps looping while workers are mid-run, and must
             # not paint over their "working" state.
             if not self._has_active_runs():
                 self._state.set_phase("waiting")
+
+            if time.monotonic() - last_sweep >= SWEEP_INTERVAL_SECONDS:
+                last_sweep = time.monotonic()
+                self._sweep()
+
             try:
                 items = self._source.poll(timeout=self._wait_timeout)
             except Exception as exc:  # noqa: BLE001
                 transient_fails = log_poll_failure(logger, "Board API", exc, transient_fails)
+                poll_failed = True
                 self._stop.wait(3)
                 continue
-            transient_fails = 0
+
+            transient_fails = log_poll_recovered(logger, "Board API", transient_fails)
+
+            # Deliveries made while the source was unreachable are gone: the
+            # board sends each one once. Sweep as soon as polling works again
+            # rather than waiting out the interval.
+            if poll_failed:
+                poll_failed = False
+                last_sweep = time.monotonic()
+                self._sweep()
 
             for work in items:
                 if self._stop.is_set():
                     return
                 self._process(work)
+
+    def _sweep(self) -> None:
+        """Run whatever the source still says is assigned to this agent.
+
+        The delivery channel :meth:`Source.poll` reads is one-shot, so work it
+        missed — delivered while the poll loop was erroring, or never delivered
+        per item at all — is only found by going to look. Swept items take the
+        very same :meth:`_process` path as delivered ones, and claiming is the
+        dedup: a task already claimed or already running answers no claim, so
+        an item that is both delivered and swept still runs once.
+
+        A sweep that fails is logged and dropped. It must never end the poll
+        thread, and the next sweep is only an interval away.
+        """
+        try:
+            items = self._source.sweep()
+        except Exception as exc:  # noqa: BLE001 — a failed sweep must not kill the poll loop
+            if is_transient(exc):
+                logger.info("work sweep deferred (%s); will retry", describe_transient(exc))
+            else:
+                logger.warning("work sweep failed", exc_info=True)
+            return
+
+        # `_process` waits for a free slot, exactly as it does for delivered
+        # work, so a sweep never runs more than the connection allows.
+        for work in items:
+            if self._stop.is_set():
+                return
+            self._process(work)
 
     def _process(self, work: WorkItem) -> None:
         """Claim one work item and hand it to the run pipeline, if claiming

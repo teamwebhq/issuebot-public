@@ -91,6 +91,7 @@ class _Client(Protocol):
     def wait_for_work(
         self, *, timeout: int = ..., board_id: str | None = ...
     ) -> list[dict[str, Any]]: ...
+    def get_my_work(self, *, board_id: str | None = ...) -> list[dict[str, Any]]: ...
     def claim(
         self, task_id: str, *, install_id: str | None = ..., executor: str | None = ...
     ) -> dict[str, Any]: ...
@@ -189,12 +190,23 @@ class Issuebear(Source):
     # -- discover / claim / release -----------------------------------------
 
     def poll(self, *, timeout: int) -> list[WorkItem]:
-        """Long-poll for work on this connection's board, already scoped to it.
+        """Long-poll for work on this connection's board, already scoped to it."""
+        return self._items(self._client.wait_for_work(timeout=timeout, board_id=self._board))
 
-        ``/me/work`` is agent-wide, so items are filtered again here even
-        though ``wait_for_work`` is also asked to scope server-side — belt
-        and braces against a server that doesn't."""
-        payloads = self._client.wait_for_work(timeout=timeout, board_id=self._board)
+    def sweep(self) -> list[WorkItem]:
+        """The work still assigned to this agent on this connection's board.
+
+        The same list, read the same way, as `poll`'s one-shot delivery
+        channel — so an item the board delivered while nothing was listening is
+        offered again by the runner's sweep."""
+        return self._items(self._client.get_my_work(board_id=self._board))
+
+    def _items(self, payloads: list[dict[str, Any]]) -> list[WorkItem]:
+        """Parse a board work list, scoped to this connection's board.
+
+        Both `/me/work` and `/me/work/wait` are agent-wide, so items are
+        filtered again here even though each request is also scoped
+        server-side — belt and braces against a server that doesn't."""
         items = [WorkItem.from_api(p) for p in payloads]
         return [item for item in items if item.for_source_ref(self._board)]
 

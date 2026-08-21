@@ -36,12 +36,23 @@ class _Listener:
 
 
 class _CmdClient:
-    """Serves one command on the first wait, then [] and sets stop."""
+    """Serves one command (or a batch) on the first wait, then [] and sets stop.
 
-    def __init__(self, command: dict, stop: threading.Event) -> None:
-        self._command = command
+    ``ack_error`` stands in for a board that cannot be reached — which is what a
+    deploy looks like from inside the update it is installing.
+    """
+
+    def __init__(
+        self,
+        command: dict | list[dict],
+        stop: threading.Event,
+        *,
+        ack_error: Exception | None = None,
+    ) -> None:
+        self._batch = command if isinstance(command, list) else [command]
         self._served = False
         self._stop = stop
+        self._ack_error = ack_error
         self.acks: list[dict] = []
         self.seen_install_ids: list[str | None] = []
 
@@ -49,12 +60,15 @@ class _CmdClient:
         self.seen_install_ids.append(install_id)
         if not self._served:
             self._served = True
-            return [self._command]
+            return self._batch
         self._stop.set()
         return []
 
     def ack_command(self, command_id: str, *, status: str, result=None) -> None:
         self.acks.append({"id": command_id, "status": status, "result": result})
+
+        if self._ack_error is not None:
+            raise self._ack_error
 
 
 def test_restart_acks_stops_listeners_and_relaunches():
@@ -234,7 +248,9 @@ def test_update_waits_for_in_flight_work_before_touching_anything():
         drain_timeout=1.5,
     )
 
-    assert listener.events == ["held", "updated"]
+    # The trailing "resumed" is the test's relaunch returning; the real one
+    # (os.execv) never does.
+    assert listener.events[:2] == ["held", "updated"]
     assert listener.held == [1.5]
 
 
@@ -353,3 +369,89 @@ def test_a_failed_update_says_what_the_installer_said(tmp_path, monkeypatch):
         commands._default_run_update()
 
     assert complaint in str(failure.value)
+
+
+def test_an_update_relaunches_even_when_the_board_never_hears_the_ack():
+    """The update is already installed, so the board's silence changes nothing.
+
+    Acking is a board HTTP call and the update being installed is often the very
+    deploy that takes the board down. An ack that raised used to kill the command
+    thread with every concurrency permit still held: a runner that looked alive
+    and claimed nothing, with restart — the only lever — no longer listened for.
+    """
+    stop = threading.Event()
+    client = _CmdClient({"id": "c10", "kind": "update"}, stop, ack_error=RuntimeError("board down"))
+    listener = _Listener()
+    relaunched = {"hit": False}
+
+    def relaunch() -> None:
+        relaunched["hit"] = True
+        stop.set()
+
+    run_command_loop(
+        client,
+        stop=stop,
+        listeners=[listener],
+        relaunch=relaunch,
+        run_update=lambda: None,
+        wait_timeout=0,
+    )
+
+    assert relaunched["hit"] is True
+    assert listener.resumed == len(listener.held)  # no listener left held
+
+
+def test_a_restart_still_happens_when_the_board_never_hears_the_ack():
+    """Restart is the only lever on a stuck runner; an unheard ack must not
+    take it away."""
+    stop = threading.Event()
+    client = _CmdClient(
+        {"id": "c11", "kind": "restart"}, stop, ack_error=RuntimeError("board down")
+    )
+    listener = _Listener()
+    relaunched = {"hit": False}
+
+    def relaunch() -> None:
+        relaunched["hit"] = True
+        stop.set()
+
+    run_command_loop(
+        client,
+        stop=stop,
+        listeners=[listener],
+        relaunch=relaunch,
+        run_update=lambda: None,
+        wait_timeout=0,
+    )
+
+    assert listener.stopped is True
+    assert relaunched["hit"] is True
+
+
+def test_a_failing_command_does_not_end_the_command_loop():
+    """One command that blows up must not deafen the runner for the life of the
+    process — the next command is still handled."""
+    stop = threading.Event()
+    client = _CmdClient(
+        [{"id": "c12", "kind": "restart"}, {"id": "c13", "kind": "restart"}],
+        stop,
+    )
+    relaunches: list[str] = []
+
+    def relaunch() -> None:
+        relaunches.append("hit")
+        if len(relaunches) == 1:
+            raise RuntimeError("exec boom")
+        stop.set()
+
+    run_command_loop(
+        client,
+        stop=stop,
+        listeners=[],
+        relaunch=relaunch,
+        run_update=lambda: None,
+        wait_timeout=0,
+    )
+
+    assert len(relaunches) == 2
+    assert [ack["id"] for ack in client.acks] == ["c12", "c13"]

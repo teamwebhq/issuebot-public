@@ -143,7 +143,11 @@ connection. All checks after the PAT check are warnings.
 
 ## How a task runs
 
-1. **Get work** — issuebot gets a work item from the source.
+1. **Get work** — issuebot gets a work item from the source. The source sends
+   each work item one time, when the work starts. Also, issuebot examines the
+   list of work that stays assigned to the agent. It does this examination at
+   the start, then every 5 minutes, and again after a failed connection to the
+   source. Thus, work that the one-time delivery does not send is not lost.
 2. **Claim the task** — issuebot claims an assigned task. If a different listener
    has the claim, issuebot continues to the next work item. A mention uses its
    non-locking run from the source.

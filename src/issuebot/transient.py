@@ -64,3 +64,18 @@ def log_poll_failure(
         return consecutive + 1
     logger.warning("%s poll failed; backing off", label, exc_info=True)
     return 0
+
+
+def log_poll_recovered(logger: logging.Logger, label: str, consecutive: int) -> int:
+    """Log that a poll loop came back after failures, and return the reset count.
+
+    Called after every successful poll, so the caller resets its counter
+    through here rather than by hand. A loop that was never failing says
+    nothing — the quiet case is the common one. A loop that was gets one INFO
+    line naming how many failures it rode out, because an outage otherwise ends
+    in silence: the last thing in the log is the escalated WARNING, which reads
+    like the runner gave up when it in fact recovered.
+    """
+    if consecutive:
+        logger.info("%s back after %d failed poll(s)", label, consecutive)
+    return 0
