@@ -230,6 +230,20 @@ def test_a_handoff_to_the_agent_itself_goes_to_the_requester_instead():
     assert "Sam Vimes" in api.comments[0][1]
 
 
+def test_a_mention_handing_the_task_to_the_agent_itself_self_assigns():
+    """A mention session ends where a work session cannot: taking the task on.
+    Nothing is ending that would have picked it up — the assignment is what
+    starts the work session — so it stands, and nobody is told otherwise."""
+    api = FakeApi(members=_ROSTER, task={"id": "t1", "reference": "ISS-1", "requester_id": "u-sam"})
+
+    _source(api, agent_id="u-hetzner").apply(
+        mention(), Handoff(assignee="Hetzner", note="I will take this")
+    )
+
+    assert api.updates == [("t1", {"assignee_id": "u-hetzner"})]
+    assert api.comments == []
+
+
 def test_a_handoff_on_the_agents_own_task_goes_to_the_agents_owner():
     """An agent stays the requester of the follow-ups it raises, so the task it
     hands back names itself — the person to hand it to is the human who owns

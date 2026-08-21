@@ -338,8 +338,11 @@ class Issuebear(Source):
             assignee_id = self._assignee_id(work, decision.assignee)
 
             # A hand-off to ourselves parks the task where nothing moves it, so
-            # it goes back to whoever asked for the work instead.
-            if assignee_id is not None and assignee_id == self._agent_id:
+            # it goes back to whoever asked for the work instead. Except from a
+            # mention: that session holds no claim, and the assignment it makes
+            # is exactly what starts the work session, so taking the task on is
+            # the point rather than a dead end.
+            if assignee_id is not None and assignee_id == self._agent_id and work.kind != "mention":
                 assignee_id = self._redirect_self_handoff(work)
 
             # An unresolved hand-off has already been reported on the task; the
@@ -439,9 +442,10 @@ class Issuebear(Source):
         """Where a hand-off the agent aimed at itself goes instead: the person
         behind the task, or nowhere.
 
-        The agent is the one thing on the board that cannot receive a hand-off
-        from itself — the session that would pick the task up is the one
-        ending — so the person the work belongs to gets it back. That is the
+        A working session is the one thing on the board that cannot hand a task
+        to this agent — the session that would pick the task up is the one
+        ending — so the person the work belongs to gets it back. (A mention
+        session is the exception its caller handles: it takes work on.) That is the
         requester, or the requester's owner when this agent raised the task
         itself. With nobody to send it to (a task the board records no
         requester for, or an agent requester with no owner) the task keeps the
