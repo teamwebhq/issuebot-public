@@ -26,8 +26,12 @@ def doctor(conn: Connection, *, echo: Callable[[str], None]) -> None:
     for long-running tasks."""
     railway = railway_settings.for_connection(conn)
 
-    if shutil.which("railway") is None:
-        echo("Warning: 'railway' CLI not found on PATH (required for executor=railway)")
+    # The executable this connection actually runs, which a connection may point
+    # at an absolute path — a bare name is what PATH must answer for.
+    command = railway.command if railway else railway_settings.DEFAULT_COMMAND
+
+    if shutil.which(command) is None:
+        echo(f"Warning: '{command}' CLI not found on PATH (required for executor=railway)")
 
     if not (railway and railway.token) and not railway_settings.ambient_token():
         variables = " nor ".join(railway_settings.TOKEN_VARS.values())

@@ -25,6 +25,7 @@ from typer.testing import CliRunner
 from conftest import StubClient, WizardStubClient, cli_runner, config, ok_client, sink_answers
 from issuebot import cli, plugins
 from issuebot.config import Connection, load_config, save_config
+from issuebot.plugins.environments.railway.doctor import doctor as railway_doctor
 from issuebot.plugins.environments.railway.settings import for_connection as railway_settings
 
 runner = CliRunner()
@@ -317,3 +318,30 @@ def test_doctor_is_quiet_when_the_environment_is_healthy(
     result = runner.invoke(cli.app, ["doctor"])
 
     assert "warning" not in result.output.lower()
+
+
+def test_doctor_looks_for_the_executable_the_connection_configured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A connection that names an absolute CLI path is warned about that path —
+    a bare 'railway' it never runs says nothing about whether it can run."""
+    asked: list[str] = []
+
+    def which(name: str) -> str | None:
+        asked.append(name)
+        return None
+
+    monkeypatch.setattr(shutil, "which", which)
+
+    conn = Connection(
+        name="p",
+        board="b",
+        executor="railway",
+        railway={"environment_id": "env-123", "command": "/opt/rw/bin/railway"},
+    )
+    messages: list[str] = []
+
+    railway_doctor(conn, echo=messages.append)
+
+    assert asked == ["/opt/rw/bin/railway"]
+    assert any("/opt/rw/bin/railway" in message for message in messages)

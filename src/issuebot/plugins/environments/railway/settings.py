@@ -30,6 +30,11 @@ RailwayTokenKind = Literal["project", "account"]
 # per connection rather than guessed from the token's shape.
 TOKEN_VARS: dict[str, str] = {"project": "RAILWAY_TOKEN", "account": "RAILWAY_API_TOKEN"}
 
+# The `railway` CLI as a bare name, resolved on PATH at run time. The one place
+# it is spelled: the model's default, and what the checks fall back to for a
+# connection that configures nothing.
+DEFAULT_COMMAND = "railway"
+
 
 class RailwaySettings(BaseModel):
     """What a connection needs to run its tasks in Railway sandboxes.
@@ -49,6 +54,15 @@ class RailwaySettings(BaseModel):
         description=(
             "'private' joins the environment's private network, so the sandbox can reach "
             "your other Railway services; 'isolated' has no such access."
+        ),
+    )
+
+    command: str = Field(
+        default=DEFAULT_COMMAND,
+        description=(
+            "The 'railway' CLI this connection runs. A bare name is resolved on PATH at run "
+            "time; give an absolute path when the runner is started as a service (systemd, "
+            "launchd, container exec), whose PATH is too small to find it."
         ),
     )
 

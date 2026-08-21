@@ -541,9 +541,11 @@ If the default branch contains a previous task branch, issuebot uses the next
 branch name. It also uses the next name if a previous branch has a merged pull
 request. For example, it can use `issuebot/<ref>-2`.
 
-Workspace preparation fails if issuebot cannot fast-forward the task branch.
-It also fails if an `update_base` rebase or merge causes a conflict. Correct
-the branch. Then, assign the task to the agent again.
+If issuebot cannot fast-forward the task branch, or if an `update_base` rebase
+or merge causes a conflict, the run continues. issuebot tells the agent to
+reconcile the branch before the task. The instructions ask for the operation
+that `update_base` names. If the agent cannot reconcile the branch safely, it
+writes a comment on the task and stops.
 
 If the run permits `changes`, a preparation or bootstrap failure fails the run.
 For other runs, issuebot uses the connection folder after a preparation
@@ -619,14 +621,17 @@ accepts only `changes` from a pushed branch. It does these steps:
    different from its base.
 2. **Find the repository** — the sink uses the connection `repo` value. If
    there is no `repo` value, it uses the checkout `origin`.
-3. **Do a check of the remote branch** — the sink uses the GitHub compare API.
+3. **Do a check of the push** — the branch must be on `origin`. If the run
+   could not push the branch, the sink stops and reports that the branch is not
+   on `origin`.
+4. **Do a check of the remote branch** — the sink uses the GitHub compare API.
    The branch head must be after its base.
-4. **Make the description** — the harness makes the pull request title and body
+5. **Make the description** — the harness makes the pull request title and body
    from the local diff. The `[github]
    summary_model` key sets the model.
-5. **Find an open pull request** — the sink uses an open pull request that it
+6. **Find an open pull request** — the sink uses an open pull request that it
    finds for the branch.
-6. **Open a pull request** — if the sink does not find an open pull request, it
+7. **Open a pull request** — if the sink does not find an open pull request, it
    opens one with the `gh` CLI.
 
 The sink cannot use the harness when the controller has no checkout. It also
@@ -676,7 +681,9 @@ from a development checkout.
 1. A **Railway account** with sandbox access, and a project and an environment
    for the sandboxes.
 2. The **`railway` CLI** on the `PATH` of the machine that runs
-   `issuebot listen`.
+   `issuebot listen`. A runner that starts as a service (systemd, launchd,
+   container exec) has a small `PATH`. Then give the full path of the CLI with
+   `--set railway.command=/full/path/to/railway`.
 3. A **Railway token** for each connection, set with `--set railway.token=…`.
    Thus one runner can use sandboxes in more than one project. A *project*
    token operates only in the environment that it was made for. Set
@@ -736,6 +743,7 @@ environment_id = "<env-id>"   # necessary
 network = "isolated"          # "isolated" (default) | "private"
 token = "<token>"             # absent = use the variable of the runner
 token_kind = "project"        # "project" (default) | "account"
+command = "railway"           # name on the PATH (default), or an absolute path
 ```
 
 With `network = "private"`, the sandbox joins the private network of the

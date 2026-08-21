@@ -87,11 +87,13 @@ class RailwayProvider:
         auth: dict[str, str],
         environment_id: str | None = None,
         private_network: bool = False,
+        command: str = railway_settings.DEFAULT_COMMAND,
         proc: Process = REAL,
     ) -> None:
         self._auth = auth
         self._environment_id = environment_id
         self._private_network = private_network
+        self._command = command
         self._proc = proc
 
     @classmethod
@@ -112,14 +114,18 @@ class RailwayProvider:
             auth=railway_settings.token_env(railway.token, railway.token_kind),
             environment_id=railway.environment_id,
             private_network=railway.network == "private",
+            command=railway.command,
             proc=proc,
         )
 
     # -- talking to the CLI -------------------------------------------------
 
     def _run(self, *argv: str) -> Completed:
-        """Run a `railway` command under this provider's credential."""
-        return self._proc.run(["railway", *argv], env=self._auth)
+        """Run a `railway` command under this provider's credential.
+
+        The executable is the connection's own: a bare name is left to PATH, an
+        absolute path is what a service-managed runner needs."""
+        return self._proc.run([self._command, *argv], env=self._auth)
 
     def _check(self, *argv: str) -> str:
         """Run a `railway` command and return stdout, raising on failure."""
@@ -183,7 +189,7 @@ class RailwayProvider:
         On cancellation the CLI process is terminated and then killed if it
         lingers — the ladder belongs to :class:`~issuebot.process.RealProcess`,
         not here."""
-        cmd = ["railway", "sandbox", "exec", "--id", sandbox_id, "--", *argv]
+        cmd = [self._command, "sandbox", "exec", "--id", sandbox_id, "--", *argv]
         return self._proc.spawn(cmd, on_line=on_line, env=self._auth, cancel=cancel)
 
     def read_file(self, sandbox_id: str, path: str) -> str:

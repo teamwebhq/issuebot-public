@@ -317,10 +317,11 @@ class GitHubSink(Sink):
         """Open (or reuse) a PR from ``delivery.changes``' pushed branch.
 
         Refuses before making any GitHub call that isn't the verification
-        itself: no ``Changes`` at all, no repository it can name, or GitHub's
-        own compare API saying the branch carries nothing — each comes back as
-        an ordinary failed :class:`~issuebot.contracts.SinkResult` rather than
-        opening a PR from nothing."""
+        itself: no ``Changes`` at all, no repository it can name, a branch that
+        never reached origin, or GitHub's own compare API saying the branch
+        carries nothing — each comes back as an ordinary failed
+        :class:`~issuebot.contracts.SinkResult` rather than opening a PR from
+        nothing."""
         assert isinstance(delivery.output, Changed)
         proc = self._proc
         changes = delivery.changes
@@ -337,6 +338,13 @@ class GitHubSink(Sink):
                 ok=False,
                 summary="could not tell which GitHub repository this connection uses",
             )
+
+        # An unpushed branch is asked about before the compare API, because
+        # GitHub has never seen its head sha: the compare call would fail for a
+        # purely local reason and read back as "the branch carries nothing",
+        # which is the opposite of what happened.
+        if not changes.pushed:
+            return SinkResult(sink=self.name, ok=False, summary="branch was not pushed to origin")
 
         if not _carries_work(proc, repo, changes.base_sha, changes.head_sha):
             return SinkResult(

@@ -56,12 +56,20 @@ class WorkspaceProblem:
     base branch conflicted); other kinds have room here. ``detail`` is the
     human sentence of what happened; ``branch``/``base`` name the refs
     involved, blank when not applicable.
+
+    ``reconcile`` is the workspace's own word for how it wants the divergence
+    resolved — echoed into the agent's instructions, so a workspace configured
+    never to rewrite history does not get a rebase back. The git workspace
+    says "rebase" or "merge", matching the connection's ``update_base``. The
+    default is "rebase", which is what every kind reported before the word
+    existed.
     """
 
     kind: str
     detail: str = ""
     branch: str = ""
     base: str = ""
+    reconcile: str = "rebase"
 
 
 @dataclass(frozen=True)

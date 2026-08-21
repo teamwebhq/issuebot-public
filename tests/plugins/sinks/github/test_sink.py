@@ -258,6 +258,17 @@ def test_refuses_when_the_branch_is_empty() -> None:
     assert proc.calls == []
 
 
+def test_refuses_an_unpushed_branch_by_saying_it_was_never_pushed() -> None:
+    """The branch carries the work — it just never left the runner, so GitHub
+    has never heard of its head sha. The refusal has to say that, not blame the
+    branch for carrying nothing."""
+    proc = _happy()
+    result = GitHubSink(proc=proc).deliver(_delivery(changes=_changes(pushed=False)))
+    assert not result.ok
+    assert "not pushed" in result.summary
+    assert not any(c[:2] == ["gh", "api"] for c in proc.calls)
+
+
 # ---------------------------------------------------------------------------
 # The PR description
 # ---------------------------------------------------------------------------
@@ -485,7 +496,12 @@ def test_a_required_sink_does_not_fail_a_successful_clone_connection():
     )
 
     changes = Changes(
-        branch="issuebot/ISS-1", base_sha="a", head_sha="b", stat="1 file", files_changed=1
+        branch="issuebot/ISS-1",
+        base_sha="a",
+        head_sha="b",
+        stat="1 file",
+        files_changed=1,
+        pushed=True,
     )
     response = Response(status="done", changes=changes, outputs=[Changed(summary="did stuff")])
     sinks = [(SinkRef(name="github", required=True), GitHubSink(proc=proc))]

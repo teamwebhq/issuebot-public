@@ -195,8 +195,9 @@ def render_work_prompt(
 
 
 # Prepended to a work prompt when the task's branch diverged from origin and the
-# agent must reconcile it before starting. {base_line}/{base_step} are filled only
-# for a base divergence ("diverged-base"); they are empty strings otherwise.
+# agent must reconcile it before starting. {reconcile_step} is the rebase or the
+# merge wording; {base_line}/{base_step} are filled only for a base divergence
+# ("diverged-base") and are empty strings otherwise.
 _RECONCILE_PREAMBLE = """\
 ⚠️ Before you start this task, reconcile its branch with the remote.
 
@@ -205,7 +206,7 @@ The branch `{branch}` has diverged from origin and could not be auto-synced \
 
 Reconcile it **locally** first:
 - Run `git fetch origin`.
-- Rebase your local branch onto `origin/{branch}`, resolving any conflicts.{base_step}
+- {reconcile_step}{base_step}
 - Preserve commits that exist only on the remote — never drop others' work.
 - Do NOT push. Leave the branch reconciled locally; the runner does the final push.
 
@@ -229,20 +230,42 @@ def render_reconcile_preamble(problem: WorkspaceProblem) -> str:
 
     ``problem.kind`` is "diverged-branch" (origin gained commits the local
     branch lacks — the agent's rebase onto ``origin/<branch>`` makes the
-    runner's plain final push a fast-forward) or "diverged-base" (rebasing onto
-    the updated base branch conflicted); for the latter the ``base`` branch
-    name is woven in so the agent also rebases onto it.
+    runner's plain final push a fast-forward) or "diverged-base" (updating from
+    the base branch conflicted); for the latter the ``base`` branch name is
+    woven in so the agent reconciles onto it too.
 
-    ponytail: for a "diverged-base" reconcile of a branch origin already has,
-    the rebase rewrites pushed commits, so the runner's never-forced push can
-    come back rejected — recorded honestly as ``Changes(pushed=False)``, per
-    ADR-0012. Restoring a clean push there needs `--force-with-lease`, which
-    stays deleted.
+    ``problem.reconcile`` picks the wording: "rebase" or "merge". A connection
+    whose ``update_base`` is "merge" asked for history never to be rewritten,
+    so telling it to rebase would undo the setting from inside the prompt.
+
+    ponytail: for a "diverged-base" rebase of a branch origin already has, the
+    rewritten commits make the runner's plain push reject — the workspace
+    retries that one case with ``--force-with-lease`` (ADR-0013), so the
+    reconciled branch still reaches origin.
     """
+    merging = problem.reconcile == "merge"
+
+    # The one bullet that names the operation, plus the base sentences that a
+    # base divergence adds. Same shape either way; only the verb changes.
+    if merging:
+        reconcile_step = (
+            f"Merge `origin/{problem.branch}` into your local branch, resolving any conflicts."
+        )
+    else:
+        reconcile_step = (
+            f"Rebase your local branch onto `origin/{problem.branch}`, resolving any conflicts."
+        )
+
     if problem.kind == "diverged-base" and problem.base:
         base = problem.base
-        base_line = f" The base branch `{base}` moved and rebasing onto it conflicted."
-        base_step = f"\n- Also rebase onto `origin/{base}` so the branch sits on the latest base."
+        if merging:
+            base_line = f" The base branch `{base}` moved and merging it conflicted."
+            base_step = f"\n- Also merge `origin/{base}` so the branch includes the latest base."
+        else:
+            base_line = f" The base branch `{base}` moved and rebasing onto it conflicted."
+            base_step = (
+                f"\n- Also rebase onto `origin/{base}` so the branch sits on the latest base."
+            )
     else:
         base_line = ""
         base_step = ""
@@ -250,6 +273,7 @@ def render_reconcile_preamble(problem: WorkspaceProblem) -> str:
     return _RECONCILE_PREAMBLE.format(
         branch=problem.branch,
         detail=problem.detail or "no detail given",
+        reconcile_step=reconcile_step,
         base_line=base_line,
         base_step=base_step,
     )

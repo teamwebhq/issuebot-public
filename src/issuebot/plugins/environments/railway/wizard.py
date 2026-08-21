@@ -14,6 +14,7 @@ from typing import Any, get_args
 import typer
 
 from issuebot.plugins.environments.railway.settings import (
+    DEFAULT_COMMAND,
     RailwayNetwork,
     RailwaySettings,
     RailwayTokenKind,
@@ -32,9 +33,12 @@ def _warn_prereqs(has_token: bool = False) -> None:
     The same checks ``issuebot doctor`` runs against an already-saved
     connection, said early enough to act on. The connection is saved regardless.
     """
-    if shutil.which("railway") is None:
+    # The wizard does not ask where the CLI is, so the check is the default name
+    # on PATH. A connection that needs an absolute path sets `railway.command`
+    # afterwards, and `issuebot doctor` then checks that path instead.
+    if shutil.which(DEFAULT_COMMAND) is None:
         typer.echo(
-            "Warning: 'railway' CLI not found on PATH (required to run railway tasks).",
+            f"Warning: '{DEFAULT_COMMAND}' CLI not found on PATH (required to run railway tasks).",
             err=True,
         )
     if not has_token and not ambient_token():

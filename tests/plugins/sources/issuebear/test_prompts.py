@@ -184,6 +184,25 @@ def test_reconcile_preamble_base_kind_weaves_in_base_branch():
     assert "rebase onto main conflicted" in out
 
 
+def test_reconcile_preamble_asks_for_a_merge_when_the_connection_merges_the_base():
+    """A connection configured `update_base = "merge"` never wants history
+    rewritten. The preamble must tell the agent to merge, not to rebase."""
+    out = prompts.render_reconcile_preamble(
+        WorkspaceProblem(
+            kind="diverged-base",
+            detail="merge of main conflicted",
+            branch="issuebot/ISS-9",
+            base="main",
+            reconcile="merge",
+        )
+    )
+    assert "git fetch origin" in out
+    assert "origin/main" in out
+    assert "Do NOT push" in out
+    assert "ebase" not in out, "a merge connection was told to rebase"
+    assert "erge" in out
+
+
 # ---------------------------------------------------------------------------
 # The response-file instructions
 # ---------------------------------------------------------------------------

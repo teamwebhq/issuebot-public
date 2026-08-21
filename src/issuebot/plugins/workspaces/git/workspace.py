@@ -87,6 +87,11 @@ class BranchDiverged(GitError):
     and reports it as `Prepared.problem` — data the runner routes to the agent
     to reconcile in-workspace. ``base`` is the base branch name for a base
     divergence.
+
+    ``reconcile`` is how the agent should resolve it — the connection's own
+    ``update_base`` mode for a base divergence, so a connection that merges
+    the base is never told to rebase it. A branch divergence is always a
+    rebase: those local commits were never pushed.
     """
 
     def __init__(
@@ -97,12 +102,14 @@ class BranchDiverged(GitError):
         folder: str = "",
         kind: DivergenceKind = "branch",
         base: str | None = None,
+        reconcile: str = "rebase",
     ) -> None:
         self.branch = branch
         self.detail = detail
         self.folder = folder
         self.kind = kind
         self.base = base
+        self.reconcile = reconcile
         super().__init__(f"branch {branch} diverged from remote{f': {detail}' if detail else ''}")
 
 
@@ -417,18 +424,30 @@ def _update_base(g: Git, branch: str, mode: str) -> None:
     base = g.default_branch()
     g.git("fetch", "origin", base)
 
+    # The mode rides the exception: it is how this connection wants the base
+    # reconciled, and the agent's instructions have to say the same word.
     if mode == "rebase":
         if not g.git("rebase", f"origin/{base}").ok:
             g.git("rebase", "--abort")
             raise BranchDiverged(
-                branch, f"rebase onto {base} conflicted", folder=g.folder, kind="base", base=base
+                branch,
+                f"rebase onto {base} conflicted",
+                folder=g.folder,
+                kind="base",
+                base=base,
+                reconcile="rebase",
             )
         return
 
     if not g.git("merge", "--no-edit", f"origin/{base}").ok:
         g.git("merge", "--abort")
         raise BranchDiverged(
-            branch, f"merge of {base} conflicted", folder=g.folder, kind="base", base=base
+            branch,
+            f"merge of {base} conflicted",
+            folder=g.folder,
+            kind="base",
+            base=base,
+            reconcile="merge",
         )
 
 
@@ -866,15 +885,35 @@ def _effective_base(g: Git, prepared: Prepared) -> str:
     return r.out.strip() if r.ok and r.out.strip() else base
 
 
-def _push(g: Git, branch: str) -> bool:
+def _push(g: Git, branch: str, *, rewritten: bool = False) -> bool:
     """Push the branch to origin, returning True when it lands.
 
-    Never forced: a rejected push is data (``Changes(pushed=False)``), not a
-    retry with ``--force-with-lease`` (deleted, ADR-0012). A reconciled branch
-    divergence fast-forwards here, so the plain push suffices; a reconciled
-    *base* rebase of an already-pushed branch is the one case that still
-    rejects, and it lands as ``pushed=False`` rather than a force."""
-    return g.git("push", "-u", "origin", branch).ok
+    Plain and unforced on an ordinary run: a rejected push is data
+    (``Changes(pushed=False)``), not a retry. A reconciled *branch* divergence
+    fast-forwards here, so the plain push suffices for it too.
+
+    ``rewritten`` is the one case that may force (ADR-0013): the run started
+    with a reconcile problem and the agent's reconcile rewrote commits origin
+    already holds, so a plain push can only ever be rejected and the finished
+    work would never leave the runner. The retry is ``--force-with-lease``,
+    which refuses if origin moved since our fetch — so another contributor who
+    pushed while the agent worked is never overwritten.
+
+    A rejection is logged rather than left to `Changes(pushed=False)` alone:
+    nothing else in the run says the finished branch is still only on this
+    machine, and the sink that refuses it later cannot see git's own reason."""
+    result = g.git("push", "-u", "origin", branch)
+    if result.ok:
+        return True
+
+    if rewritten:
+        forced = g.git("push", "--force-with-lease", "-u", "origin", branch)
+        if forced.ok:
+            return True
+        result = forced  # report the lease's refusal, not the first rejection
+
+    logger.warning("push of %s to origin was rejected: %s", branch, result.message)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -988,6 +1027,7 @@ class GitWorkspace(Workspace):
                 detail=exc.detail,
                 branch=exc.branch,
                 base=exc.base or "",
+                reconcile=exc.reconcile,
             )
         g = Git(folder, proc)
         # `_prepare_workspace` already resolved and checked out the task branch
@@ -1043,7 +1083,12 @@ class GitWorkspace(Workspace):
             if remote.ok and remote.out.strip() == head_sha:
                 pushed = True
             elif head_sha != base_sha:
-                pushed = _push(g, prepared.branch)
+                # `_effective_base` moves the base off the recorded sha exactly
+                # when a reconcile rewrote history — the same condition, asked
+                # once, so nothing has to re-derive "is the recorded sha still
+                # an ancestor of HEAD".
+                rewritten = prepared.problem is not None and base_sha != prepared.base_sha
+                pushed = _push(g, prepared.branch, rewritten=rewritten)
 
         return Changes(
             branch=prepared.branch,

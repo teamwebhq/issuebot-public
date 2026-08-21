@@ -3,14 +3,18 @@ opposed to the module-level functions they wrap — see `test_workspace.py`."""
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from conftest import completed
 from issuebot.config import Connection
+from issuebot.plugins.workspaces.base import Prepared
 from issuebot.plugins.workspaces.git.settings import Settings
 from issuebot.plugins.workspaces.git.workspace import GitWorkspace
+from issuebot.process import RecordingProcess
 from issuebot.reporter import NullReporter
 
 
@@ -299,6 +303,99 @@ def test_changes_after_a_reconciled_base_divergence_exclude_the_base_commits(
     assert "agent.txt" in diffed
 
 
+def test_a_reconciled_base_rebase_still_reaches_origin(repo: Path, tmp_path: Path) -> None:
+    """The whole point of a base reconcile. The task branch is already on
+    origin, so the agent's rebase rewrites commits the remote holds and a plain
+    push is rejected — the branch would sit finished on the runner's disk and
+    every sink would report it as carrying nothing. The reconciled branch must
+    land on origin."""
+    _bare_origin(tmp_path, repo)
+    conn = Connection(
+        name="p", board="b", folder=str(repo), git_init="branch", update_base="rebase"
+    )
+    workspace = GitWorkspace()
+    workspace.prepare(conn, "ISS-7", settings=Settings())
+
+    # The task branch does some work and is pushed — origin now holds it.
+    (repo / "README.md").write_text("task side\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "task edit")
+    _git(repo, "push", "-u", "origin", "issuebot/ISS-7")
+
+    # Meanwhile the base branch moves, conflicting with the task branch.
+    other = tmp_path / "oc"
+    _git(repo, "clone", str(tmp_path / "origin.git"), str(other))
+    (other / "README.md").write_text("base side\n")
+    _git(other, "add", "-A")
+    _git(other, "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-m", "base edit")
+    _git(other, "push", "origin", "main")
+
+    prepared = workspace.prepare(conn, "ISS-7", settings=Settings())
+    assert prepared.problem is not None and prepared.problem.kind == "diverged-base"
+
+    # The agent follows the reconcile preamble: rebase onto origin/main,
+    # resolving the conflict, then does the task's own work.
+    _git(repo, "fetch", "origin")
+    try:
+        _git(repo, "rebase", "origin/main")
+    except Exception:
+        (repo / "README.md").write_text("resolved\n")
+        _git(repo, "add", "-A")
+        _git(repo, "-c", "core.editor=true", "rebase", "--continue")
+    (repo / "agent.txt").write_text("a\n")
+
+    changes = workspace.commit_and_push(prepared, "agent work", settings=Settings())
+
+    assert changes.pushed is True
+    assert _git(repo, "rev-parse", "origin/issuebot/ISS-7") == changes.head_sha
+
+
+def test_an_ordinary_rejected_push_is_never_forced() -> None:
+    """Only a reconcile that rewrote history may force. An ordinary run whose
+    push is rejected reports `pushed=False` and leaves origin alone — whatever
+    is on the remote was put there by somebody this run never heard about."""
+    proc = RecordingProcess(
+        replies={
+            # Ordered: `RecordingProcess` matches on insertion order, and
+            # "remotes" would otherwise be swallowed by the "git remote" entry.
+            "refs/remotes/origin/b": completed(out="somebody-else\n"),
+            "rev-parse HEAD": completed(out="head-sha\n"),
+            "git remote": completed(out="origin\n"),
+            "push": completed(code=1, err="rejected: non-fast-forward"),
+        }
+    )
+    prepared = Prepared(folder="/repo", branch="b", base_sha="base-sha", problem=None)
+
+    changes = GitWorkspace().commit_and_push(prepared, "work", settings=Settings(), proc=proc)
+
+    assert changes.pushed is False
+    pushes = [c for c in proc.calls if "push" in c]
+    assert len(pushes) == 1, f"the rejected push was retried: {pushes}"
+    assert not any("--force-with-lease" in c for c in proc.calls)
+
+
+def test_a_rejected_push_says_so_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    """`Changes(pushed=False)` is the only trace a rejected push used to leave,
+    and nothing reads it until a sink refuses much later. Whoever reads the run
+    log must be able to see that the branch never left the runner, and why."""
+    proc = RecordingProcess(
+        replies={
+            "refs/remotes/origin/b": completed(out="somebody-else\n"),
+            "rev-parse HEAD": completed(out="head-sha\n"),
+            "git remote": completed(out="origin\n"),
+            "push": completed(code=1, err="rejected: non-fast-forward"),
+        }
+    )
+    prepared = Prepared(folder="/repo", branch="b", base_sha="base-sha", problem=None)
+
+    with caplog.at_level(logging.WARNING, logger="issuebot"):
+        GitWorkspace().commit_and_push(prepared, "work", settings=Settings(), proc=proc)
+
+    logged = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "b" in logged
+    assert "non-fast-forward" in logged
+
+
 def test_a_conflicted_base_update_is_reported_as_a_base_problem(repo: Path, tmp_path: Path) -> None:
     """`update_base="rebase"` conflicting must abort cleanly (no rebase left in
     progress) and report a `diverged-base` problem naming the base branch."""
@@ -329,6 +426,39 @@ def test_a_conflicted_base_update_is_reported_as_a_base_problem(repo: Path, tmp_
     # No half-finished rebase left behind.
     assert not (repo / ".git" / "rebase-merge").exists()
     assert not (repo / ".git" / "rebase-apply").exists()
+    # A rebase connection asks the agent for a rebase.
+    assert prepared.problem.reconcile == "rebase"
+
+
+def test_a_conflicted_merge_of_the_base_asks_the_agent_for_a_merge(
+    repo: Path, tmp_path: Path
+) -> None:
+    """`update_base = "merge"` is a connection saying "never rewrite history".
+    The problem it reports must carry that word through to the agent, so the
+    reconcile instructions do not ask for the one thing the setting forbids."""
+    _bare_origin(tmp_path, repo)
+    conn = Connection(name="p", board="b", folder=str(repo), git_init="branch", update_base="merge")
+    workspace = GitWorkspace()
+    workspace.prepare(conn, "ISS-6", settings=Settings())
+
+    # Conflicting edits to the same file on the task branch and on origin/main.
+    (repo / "README.md").write_text("task side\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "task edit")
+    other = tmp_path / "oc"
+    _git(repo, "clone", str(tmp_path / "origin.git"), str(other))
+    (other / "README.md").write_text("base side\n")
+    _git(other, "add", "-A")
+    _git(other, "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-m", "base edit")
+    _git(other, "push", "origin", "main")
+
+    prepared = workspace.prepare(conn, "ISS-6", settings=Settings())
+
+    assert prepared.problem is not None
+    assert prepared.problem.kind == "diverged-base"
+    assert prepared.problem.reconcile == "merge"
+    # No half-finished merge left behind.
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
 
 
 def test_folder_problem_wants_a_git_repository(repo: Path, tmp_path: Path) -> None:

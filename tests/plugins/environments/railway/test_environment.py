@@ -319,3 +319,30 @@ def test_the_rebuild_command_quoted_at_users_is_one_the_cli_has():
 
     result = CliRunner().invoke(cli.app, [*words[1:], "--help"])
     assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Which executable is run
+# ---------------------------------------------------------------------------
+
+
+def test_the_connection_chooses_which_executable_the_cli_calls():
+    """A runner started as a service gets a minimal PATH, so a connection may
+    name an absolute path to the CLI instead of a name resolved on PATH."""
+    proc = RecordingProcess(replies={"sandbox create": completed(out='{"id": "s"}')})
+    conn = railway_connection(railway={"environment_id": "e", "command": "/opt/rw/bin/railway"})
+
+    provider = RailwayProvider.for_connection(conn, proc)
+    provider.create(env={})
+    provider.exec_stream("s", ["issuebot", "run-one"], on_line=lambda _line: None)
+
+    assert [call[0] for call in proc.calls] == ["/opt/rw/bin/railway"] * 2
+
+
+def test_an_unconfigured_executable_is_still_the_name_on_path():
+    proc = RecordingProcess(replies={"sandbox create": completed(out='{"id": "s"}')})
+    conn = railway_connection(railway={"environment_id": "e"})
+
+    RailwayProvider.for_connection(conn, proc).create(env={})
+
+    assert proc.calls[0][0] == "railway"
