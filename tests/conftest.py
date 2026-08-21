@@ -296,6 +296,7 @@ class FakeApi:
         connect_error: Exception | None = None,
         run_id: str = "r1",
         agent_id: str | None = None,
+        members: list[dict[str, Any]] | None = None,
     ) -> None:
         self._task = task or {
             "id": "t1",
@@ -308,6 +309,7 @@ class FakeApi:
         self._connect_error = connect_error
         self._run_id = run_id
         self._agent_id = agent_id
+        self._members = list(members or [])
         self._served = threading.Event()
 
         # Everything that happened, for assertions.
@@ -320,6 +322,7 @@ class FakeApi:
         self.heartbeats: list[str] = []
         self.sandbox_reports: list[dict[str, Any]] = []
         self.wait_board_ids: list[str | None] = []
+        self.member_lookups: list[str] = []
         self.telemetry: list[dict[str, Any]] = []
         self.released = threading.Event()
 
@@ -387,6 +390,10 @@ class FakeApi:
         self.updates.append((task_id, fields))
         self.calls.append(("update", fields))
         return {"id": task_id}
+
+    def list_board_members(self, board_id: str) -> list[dict[str, Any]]:
+        self.member_lookups.append(board_id)
+        return list(self._members)
 
     # -- connection lifecycle ----------------------------------------------
 

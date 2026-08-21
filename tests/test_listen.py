@@ -87,6 +87,11 @@ class ScriptedApi:
         self.comments.append((task_id, body))
         return {"id": "c1"}
 
+    def list_board_members(self, board_id: str) -> list[dict[str, Any]]:
+        # One member, whose display name doubles as their user id, so a handoff
+        # to "sam" resolves to "sam" and these tests stay about the listener.
+        return [{"name": "sam", "user_id": "sam"}]
+
     def update_task(self, task_id: str, **fields: Any) -> dict[str, Any]:
         self.updates.append((task_id, fields))
         self.calls.append("update_task")

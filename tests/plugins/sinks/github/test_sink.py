@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from conftest import completed, sandbox_connection, work
@@ -47,14 +49,20 @@ def _delivery(
 
 
 def _happy(**replies: object) -> RecordingProcess:
-    """A process that answers every call this sink makes on the happy path."""
-    scripted = {
+    """A process that answers every call this sink makes on the happy path.
+
+    A test's own patterns go in first, because `RecordingProcess` matches in
+    insertion order: scripting the compare endpoint asked for a diff must not be
+    swallowed by the broader `gh api` default sitting in front of it.
+    """
+    scripted: dict[str, object] = dict(replies)
+    for pattern, reply in {
         "gh api": completed(out='{"ahead_by": 3}'),
         "gh pr list": completed(out=""),
         "gh pr create": completed(out="https://github.com/o/r/pull/9\n"),
-    }
-    scripted.update(replies)  # type: ignore[arg-type]
-    return RecordingProcess(replies=scripted)
+    }.items():
+        scripted.setdefault(pattern, reply)
+    return RecordingProcess(replies=scripted)  # type: ignore[arg-type]
 
 
 def test_the_github_sink_opens_a_pull_request() -> None:
@@ -280,6 +288,7 @@ def test_uses_the_harness_summary_when_one_is_available() -> None:
     result = GitHubSink(harness=harness, summary_model="haiku", proc=proc).deliver(_delivery())
 
     assert result.ok
+    assert result.summary == "opened PR"
     assert len(harness.summarize_calls) == 1
     diff, context, model, folder = harness.summarize_calls[0]
     assert diff == "--- a\n+++ b\n"
@@ -292,10 +301,59 @@ def test_uses_the_harness_summary_when_one_is_available() -> None:
     assert "Because it was missing." in create[create.index("--body") + 1]
 
 
-def test_no_checkout_means_a_mechanical_description_rather_than_no_pr() -> None:
-    """The diff is the only thing here that genuinely needs a working copy, and
-    a connection without one still deserves its PR."""
-    proc = _happy()
+def test_a_checkout_reads_its_diff_locally_and_asks_the_forge_for_nothing() -> None:
+    """With a working copy there is no reason to spend an API call on the diff."""
+    proc = _happy(**{"git diff": completed(out="--- a\n+++ b\n")})
+    harness = FakeHarness(summary="Add the widget")
+
+    result = GitHubSink(harness=harness, proc=proc).deliver(_delivery())
+
+    assert result.ok
+    assert any(c[:2] == ["git", "diff"] for c in proc.calls)
+    assert not any("vnd.github.v3.diff" in " ".join(c) for c in proc.calls)
+
+
+class _CwdWatchingHarness(FakeHarness):
+    """A FakeHarness that also notes whether its cwd existed when it was called.
+
+    `summarize` runs a child process, so the folder it is handed has to be a
+    real directory *at the time of the call* — which nothing can tell from the
+    recorded arguments afterwards, since a scratch directory is gone by then."""
+
+    folder_existed = False
+
+    def summarize(self, diff: str, *, context: str, model: str | None, folder: str) -> str:
+        """Note the cwd's existence, then answer as FakeHarness does."""
+        self.folder_existed = bool(folder) and Path(folder).is_dir()
+        return super().summarize(diff, context=context, model=model, folder=folder)
+
+
+def test_no_checkout_still_gets_the_model_written_description() -> None:
+    """A clone-based or sandboxed connection keeps no working copy here, so the
+    diff comes from the forge — the description is the model's either way."""
+    proc = _happy(**{"vnd.github.v3.diff": completed(out="--- a\n+++ b\n")})
+    harness = _CwdWatchingHarness(summary="Add the widget\n\nBecause it was missing.")
+
+    result = GitHubSink(harness=harness, proc=proc).deliver(
+        _delivery(folder="", summary="fixed the thing")
+    )
+
+    assert result.ok
+    assert result.summary == "opened PR"
+
+    diff, _, _, _ = harness.summarize_calls[0]
+    assert diff == "--- a\n+++ b\n"
+    assert harness.folder_existed  # a real cwd, never the listener's own
+
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    assert create[create.index("--title") + 1].endswith("Add the widget")
+    assert "Because it was missing." in create[create.index("--body") + 1]
+
+
+def test_a_diff_nobody_can_supply_says_so_in_the_delivery_summary() -> None:
+    """The PR still opens with the mechanical description, and the person
+    reading the task comment is told why it reads that way."""
+    proc = _happy(**{"vnd.github.v3.diff": completed(code=1, err="not found")})
     harness = FakeHarness(summary="Add the widget")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(
@@ -304,6 +362,8 @@ def test_no_checkout_means_a_mechanical_description_rather_than_no_pr() -> None:
 
     assert result.ok
     assert harness.summarize_calls == []
+    assert "no diff available" in result.summary
+
     create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
     assert "fixed the thing" in create[create.index("--title") + 1]
 
@@ -435,6 +495,13 @@ def test_a_required_sink_does_not_fail_a_successful_clone_connection():
     assert not run_pipeline.required_failed(results, sinks), (
         f"a genuinely successful run was reported as a required-sink failure: {results}"
     )
+    # No summarizer is wired up here, so the description is the mechanical one
+    # and the delivery summary says so.
     assert results == [
-        SinkResult(sink="github", ok=True, summary="opened PR", url="https://github.com/o/r/pull/9")
+        SinkResult(
+            sink="github",
+            ok=True,
+            summary="opened PR (mechanical description: no summarizer harness configured)",
+            url="https://github.com/o/r/pull/9",
+        )
     ]

@@ -366,6 +366,11 @@ class IssuebotClient:
         project it belongs to."""
         return self._json(self._http.get(f"/boards/{board_id}"))
 
+    def list_board_members(self, board_id: str) -> list[dict[str, Any]]:
+        """Return the members of ``board_id``: humans and agents alike, each
+        carrying the display ``name`` and the ``user_id`` an assignment wants."""
+        return self._json(self._http.get(f"/boards/{board_id}/members"))
+
     def get_project(self, project_id: str) -> dict[str, Any]:
         """Return the project record for ``project_id``, including its linked
         GitHub repository (``github_repo``), if any."""

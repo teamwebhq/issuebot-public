@@ -116,15 +116,95 @@ def test_say_posts_a_prefixed_comment():
     assert api.comments == [("t1", "issuebot: hello")]
 
 
+# The board roster the hand-off tests resolve against.
+_ROSTER = [
+    {"name": "Sam Vimes", "user_id": "u-sam", "kind": "human"},
+    {"name": "Hetzner", "user_id": "u-hetzner", "kind": "claude"},
+]
+
+_SAM_ID = "8f1d0b6e-2c47-4a1e-9c3b-0a5d6e7f8a90"
+
+
 def test_a_handoff_decision_reassigns_the_task_without_narrating_it():
     """The agent's hand-off note is already on the thread — it posted it. What
-    the board needs from the runner is the assignee, not a second telling."""
-    api = FakeApi()
+    the board needs from the runner is the assignee, not a second telling.
 
-    _source(api).apply(work(), Handoff(assignee="sam", note="over to you"))
+    An assignee that is already a user id is what the board wants, so it goes
+    through untouched and the roster is never fetched."""
+    api = FakeApi(members=_ROSTER)
 
-    assert api.updates == [("t1", {"assignee_id": "sam"})]
+    _source(api).apply(work(), Handoff(assignee=_SAM_ID, note="over to you"))
+
+    assert api.updates == [("t1", {"assignee_id": _SAM_ID})]
     assert api.comments == []
+    assert api.member_lookups == []
+
+
+def test_a_handoff_naming_a_member_assigns_that_members_user_id():
+    """Agents write the name they know a person by, in whatever case and
+    spacing they wrote it in; the board wants the user id."""
+    api = FakeApi(members=_ROSTER)
+
+    _source(api).apply(work(), Handoff(assignee="  hetzner ", note="over to you"))
+
+    assert api.updates == [("t1", {"assignee_id": "u-hetzner"})]
+    assert api.comments == []
+
+
+def test_a_handoff_naming_nobody_leaves_the_task_alone_and_says_so():
+    """An invented assignee used to 422 the patch, which also cost the run its
+    closing report. Now the task keeps its assignee and a person is told what
+    to fix by hand."""
+    api = FakeApi(members=_ROSTER)
+
+    _source(api).apply(work(), Handoff(assignee="Nobody At All", note="over to you"))
+
+    assert api.updates == []
+    assert len(api.comments) == 1
+    text = api.comments[0][1]
+    assert "Nobody At All" in text
+    assert "Sam Vimes" in text and "Hetzner" in text
+
+
+def test_an_ambiguous_handoff_name_leaves_the_task_alone():
+    """Two members share the name, so there is no way to tell which was meant."""
+    api = FakeApi(
+        members=[
+            {"name": "Sam", "user_id": "u-sam-1"},
+            {"name": "sam", "user_id": "u-sam-2"},
+        ]
+    )
+
+    _source(api).apply(work(), Handoff(assignee="Sam", note="over to you"))
+
+    assert api.updates == []
+    assert len(api.comments) == 1
+    assert "Sam" in api.comments[0][1]
+
+
+def test_a_handoff_to_the_agent_itself_goes_to_the_requester_instead():
+    """An agent handing work to itself parks the task where nothing can move
+    it: the only session that would pick it up is the one just ending. It goes
+    back to whoever asked for the work, and a person is told why."""
+    api = FakeApi(members=_ROSTER, task={"id": "t1", "reference": "ISS-1", "requester_id": "u-sam"})
+
+    _source(api, agent_id="u-hetzner").apply(work(), Handoff(assignee="Hetzner", note="over to me"))
+
+    assert api.updates == [("t1", {"assignee_id": "u-sam"})]
+    assert len(api.comments) == 1
+    assert "Sam Vimes" in api.comments[0][1]
+
+
+def test_a_handoff_to_the_agent_itself_with_no_requester_changes_nothing():
+    """With nobody to redirect to, the task keeps the assignee it has and the
+    comment is the whole of the runner's answer — never an exception, which
+    would cost the run its closing report."""
+    api = FakeApi(members=_ROSTER, task={"id": "t1", "reference": "ISS-1"})
+
+    _source(api, agent_id="u-hetzner").apply(work(), Handoff(assignee="Hetzner", note="over to me"))
+
+    assert api.updates == []
+    assert len(api.comments) == 1
 
 
 def test_a_needs_input_decision_marks_the_task_awaiting_input_only():
@@ -217,6 +297,35 @@ def test_an_assignment_prompt_carries_the_connections_confirm_setting():
     assert "confirm before building: **no**" in straight_on
     # Both plan, whatever they do about approval.
     assert "set_plan" in waits and "set_plan" in straight_on
+
+
+def test_a_work_prompt_names_the_agent_and_who_asked_for_the_task():
+    """Without this the agent guesses a name when it hands work back — which is
+    how a board display name ended up in an `assignee_id` field."""
+    api = FakeApi(members=_ROSTER, task={"id": "t1", "reference": "ISS-9", "requester_id": "u-sam"})
+    source = _source(api, agent_id="u-hetzner")
+    item = work(reference="ISS-9")
+
+    prompt = source.prompt(item, connection(), permits=source.permits(item))
+
+    assert "u-hetzner" in prompt  # who the agent is
+    assert "Sam Vimes" in prompt and "u-sam" in prompt  # who asked for the work
+    # One task read and one roster read, however many facts came out of them.
+    assert api.member_lookups == ["b"]
+
+
+def test_a_work_prompt_renders_without_a_requester_the_board_cannot_name():
+    """A board that will not answer must not cost the run its launch: the block
+    loses the requester, the prompt keeps everything else."""
+    api = FakeApi(members=_ROSTER, task={"id": "t1", "reference": "ISS-9"})
+    source = _source(api, agent_id="u-hetzner")
+    item = work(reference="ISS-9")
+
+    prompt = source.prompt(item, connection(), permits=source.permits(item))
+
+    assert "ISS-9" in prompt
+    assert "set_plan" in prompt
+    assert "u-hetzner" in prompt
 
 
 def test_a_workspace_problem_prepends_the_reconcile_preamble():

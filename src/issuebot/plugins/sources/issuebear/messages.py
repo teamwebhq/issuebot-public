@@ -58,3 +58,43 @@ def summarize(response: Response, results: list[SinkResult]) -> str | None:
         parts.append(response.result_text or f"run {response.status}")
 
     return " · ".join(parts) if parts else None
+
+
+def unresolved_assignee(assignee: str, names: list[str]) -> str:
+    """What the runner says when a hand-off names somebody the board does not have.
+
+    The task keeps its current assignee, so this has to give a person enough to
+    finish the hand-off by hand: the value the agent wrote, and who is actually
+    on the board.
+
+    Returns the bare text: the caller adds the runner's own voice (:func:`say`).
+    """
+    roster = ", ".join(names) if names else "nobody"
+    return (
+        f'could not hand this task off: "{assignee}" is not a member of this board, '
+        f"so the assignee is unchanged. Members are: {roster}."
+    )
+
+
+def self_handoff(requester: str | None) -> str:
+    """What the runner says when a hand-off names the agent itself.
+
+    An agent cannot hand work to itself: the only session that would pick the
+    task up is the one that just ended, so the task would sit assigned and
+    still. ``requester`` is who the task went back to instead — the person who
+    asked for the work — or ``None`` when the board records nobody to send it
+    to and the assignee is unchanged.
+
+    Returns the bare text: the caller adds the runner's own voice (:func:`say`).
+    """
+    if requester is not None:
+        return (
+            f"this hand-off named me, and I cannot hand work to myself, "
+            f"so the task goes back to {requester}, who asked for it."
+        )
+
+    return (
+        "this hand-off named me, and I cannot hand work to myself. This task records "
+        "nobody who asked for it, so the assignee is unchanged — please assign it to "
+        "the person who should pick it up."
+    )

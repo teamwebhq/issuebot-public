@@ -6,6 +6,7 @@ work item, built on top of the thin REST client in ``client.py``.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, ClassVar, Protocol
 
 from issuebot import plugins
@@ -45,6 +46,42 @@ _ASSIGNMENT_PERMITS: frozenset[OutputKind] = frozenset(
 _MENTION_PERMITS: frozenset[OutputKind] = frozenset({"answer", "needs_input", "handoff"})
 
 
+def _match_member(assignee: str, members: list[dict[str, Any]]) -> str | None:
+    """The ``user_id`` of the one board member ``assignee`` names, or ``None``.
+
+    ``assignee`` is whatever the agent wrote, so it is matched leniently —
+    trimmed and case-folded — against each member's display ``name`` and
+    against its ``user_id``. Exactly one member has to match: a value naming
+    nobody, and a name two members share, both resolve to ``None`` so the
+    caller leaves the task alone rather than guessing which person was meant.
+    """
+    wanted = assignee.strip().casefold()
+
+    def names(member: dict[str, Any]) -> set[str]:
+        """Everything one roster entry answers to, matched the same lenient way."""
+        return {str(member.get(field, "")).strip().casefold() for field in ("name", "user_id")}
+
+    matched = {str(member["user_id"]) for member in members if wanted in names(member)}
+
+    return matched.pop() if len(matched) == 1 else None
+
+
+def _display_name(user_id: str, members: list[dict[str, Any]]) -> str:
+    """The display name of the board member with ``user_id``, or ``""``.
+
+    The mirror of :func:`_match_member`: that turns what an agent wrote into
+    an id the board accepts, this turns an id the board gave us back into
+    something worth showing a person. An id the roster does not carry — a
+    member who left, a roster the board would not serve — answers ``""``, and
+    every caller falls back to the id itself.
+    """
+    for member in members:
+        if str(member.get("user_id", "")) == user_id:
+            return str(member.get("name") or "")
+
+    return ""
+
+
 class _Client(Protocol):
     """The slice of `IssuebotClient` this source actually calls.
 
@@ -61,6 +98,8 @@ class _Client(Protocol):
     def add_comment(self, task_id: str, body: str) -> dict[str, Any]: ...
     def update_task(self, task_id: str, **fields: Any) -> dict[str, Any]: ...
     def heartbeat(self, run_id: str) -> None: ...
+    def list_board_members(self, board_id: str) -> list[dict[str, Any]]: ...
+    def get_task(self, task_id: str) -> dict[str, Any]: ...
 
 
 class Issuebear(Source):
@@ -222,9 +261,124 @@ class Issuebear(Source):
         the board shows those without anybody narrating them.
         """
         if isinstance(decision, Handoff):
-            self._client.update_task(work.task_id, assignee_id=decision.assignee)
+            assignee_id = self._assignee_id(work, decision.assignee)
+
+            # A hand-off to ourselves parks the task where nothing moves it, so
+            # it goes back to whoever asked for the work instead.
+            if assignee_id is not None and assignee_id == self._agent_id:
+                assignee_id = self._redirect_self_handoff(work)
+
+            # An unresolved hand-off has already been reported on the task; the
+            # assignee stays as it is rather than being patched with a guess.
+            if assignee_id is not None:
+                self._client.update_task(work.task_id, assignee_id=assignee_id)
+
         elif isinstance(decision, NeedsInput):
             self._client.update_task(work.task_id, status="needs_input")
+
+    def _assignee_id(self, work: WorkItem, assignee: str) -> str | None:
+        """The board user id a hand-off's ``assignee`` names, or ``None``.
+
+        ``PATCH /tasks/{id}`` wants a user id, but an agent writes whatever it
+        knows the person by — usually their display name. A value that already
+        parses as a UUID is the id itself and passes straight through, so a
+        hand-off that carries one costs no extra board call; anything else
+        sends for the board roster once and looks it up there
+        (:func:`_match_member`).
+
+        A value that matches nobody, or more than one person, is reported on
+        the task and answered with ``None``. Raising here would also cost the
+        run its closing report, because `runner._finish` calls `apply` before
+        it reports.
+        """
+        try:
+            uuid.UUID(assignee)
+        except ValueError:
+            pass
+        else:
+            return assignee
+
+        members = self._roster()
+        matched = _match_member(assignee, members)
+        if matched is not None:
+            return matched
+
+        logger.warning("hand-off of %s names no board member: %r", work.ref, assignee)
+        names = [str(member.get("name") or "?") for member in members]
+        self.say(work, messages.unresolved_assignee(assignee, names))
+
+        return None
+
+    def _roster(self) -> list[dict[str, Any]]:
+        """This board's members, or an empty roster when the board cannot say.
+
+        Every caller reads the roster to *improve* what it does — put an id to
+        a name, a name to an id — and none of them is worth failing a run
+        over, so a board that will not answer is logged and answered with
+        nothing. Each caller already handles an id it cannot resolve, because
+        a roster that answers may still not carry the person asked about.
+        """
+        try:
+            return self._client.list_board_members(self._board)
+        except Exception:  # noqa: BLE001 - a roster we cannot read degrades the run, never ends it
+            logger.warning("could not read the members of board %s", self._board, exc_info=True)
+            return []
+
+    def _requester(
+        self, work: WorkItem, members: list[dict[str, Any]] | None = None
+    ) -> tuple[str, str]:
+        """Who asked for this task: their board user id and display name, or
+        ``("", "")`` when the board cannot say.
+
+        One `get_task`, because the work item the board delivers carries no
+        requester. Both features that need one come through here — the launch
+        prompt's identity block, and a hand-off the agent aimed at itself — so
+        a task is read once per use and "what does `requester_id` mean" is
+        answered in one place.
+
+        Pass ``members`` when the caller already holds the roster (a launch
+        reads it for the agent's own name as well), so the launch costs one
+        roster fetch rather than two.
+        """
+        try:
+            task = self._client.get_task(work.task_id)
+        except Exception:  # noqa: BLE001 - a task we cannot read degrades the run, never ends it
+            logger.warning("could not read task %s to find its requester", work.ref, exc_info=True)
+            return "", ""
+
+        requester_id = str(task.get("requester_id") or "")
+        if not requester_id:
+            return "", ""
+
+        roster = self._roster() if members is None else members
+
+        return requester_id, _display_name(requester_id, roster)
+
+    def _redirect_self_handoff(self, work: WorkItem) -> str | None:
+        """Where a hand-off the agent aimed at itself goes instead: the task's
+        requester, or nowhere.
+
+        The agent is the one thing on the board that cannot receive a hand-off
+        from itself — the session that would pick the task up is the one
+        ending — so the person who asked for the work gets it back. With
+        nobody to send it to (a task the board records no requester for, or
+        one this agent requested itself) the task keeps the assignee it has.
+
+        Either way one comment says what happened, and nothing raises:
+        `runner._finish` calls `apply` before it reports, so an exception here
+        would cost the run its closing report.
+        """
+        requester_id, requester_name = self._requester(work)
+
+        if requester_id and requester_id != self._agent_id:
+            logger.info("hand-off of %s named this agent; redirecting to its requester", work.ref)
+            self.say(work, messages.self_handoff(requester_name or requester_id))
+            return requester_id
+
+        logger.warning("hand-off of %s named this agent and it has no requester", work.ref)
+        self.say(work, messages.self_handoff(None))
+
+        return None
 
     def finish(self, work: WorkItem, response: Response, results: list[SinkResult]) -> None:
         """Report anything about the run the agent could not have reported
@@ -280,12 +434,21 @@ class Issuebear(Source):
                 permits=permits,
             )
         else:
+            # One roster read serves both halves of the identity block: the
+            # agent's own display name, and the requester's.
+            members = self._roster()
+            requester_id, requester_name = self._requester(work, members)
+
             rendered = prompts.render_work_prompt(
                 reference=work.ref,
                 done=conn_setting(connection, "done", "review"),
                 confirm=conn_setting(connection, "confirm", True),
                 mode=conn_setting(connection, "mode", "build"),
                 permits=permits,
+                agent_name=_display_name(self._agent_id, members) if self._agent_id else "",
+                agent_id=self._agent_id or "",
+                requester_name=requester_name,
+                requester_id=requester_id,
             )
 
         if problem is not None:

@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tempfile
 import textwrap
 from typing import TYPE_CHECKING, ClassVar
 
@@ -141,6 +142,38 @@ def _carries_work(proc: Process, repo: str, base_sha: str, head_sha: str) -> boo
     return bool(payload.get("ahead_by"))
 
 
+def _diff(proc: Process, repo: str, changes: Changes, folder: str) -> str:
+    """The unified diff between ``changes``' base and head, or ``""``.
+
+    A ladder: the local checkout's ``git diff`` when this connection keeps one
+    (no network), else GitHub's own compare endpoint — the same endpoint
+    :func:`_carries_work` asks, only with the diff media type, which makes it
+    answer with a unified diff instead of JSON. Empty when neither can answer,
+    which is what a caller with no repository and no checkout gets.
+
+    A clone-based or sandboxed connection keeps no checkout on this machine, and
+    the diff is the only part of the PR description that ever needed one — so it
+    is fetched rather than read, and such a connection gets the same
+    model-written description a local one gets.
+    """
+    if folder:
+        return proc.run(["git", "diff", f"{changes.base_sha}...{changes.head_sha}"], cwd=folder).out
+
+    if not repo:
+        return ""
+
+    result = proc.run(
+        [
+            "gh",
+            "api",
+            "-H",
+            "Accept: application/vnd.github.v3.diff",
+            f"repos/{repo}/compare/{changes.base_sha}...{changes.head_sha}",
+        ]
+    )
+    return result.out if result.ok else ""
+
+
 def _open_pr(proc: Process, repo: str, branch: str, title: str, body: str) -> str | None:
     """The branch's open PR url, opening one if there isn't already one.
 
@@ -175,6 +208,7 @@ def _open_pr(proc: Process, repo: str, branch: str, title: str, body: str) -> st
 
 def _describe(
     proc: Process,
+    repo: str,
     folder: str,
     changes: Changes,
     summary: str,
@@ -182,41 +216,60 @@ def _describe(
     harness: Harness | None,
     model: str | None,
     ref: str,
-) -> tuple[str, str]:
-    """The PR ``(title, body)``: ask the harness to turn the diff into one,
-    falling back to the agent's own change summary (plus ``git diff --stat``)
-    when there is no harness, no local checkout to read the diff from, the call
+) -> tuple[str, str, str]:
+    """The PR ``(title, body, fallback_reason)``: ask the harness to turn the
+    diff into one, falling back to the agent's own change summary (plus
+    ``git diff --stat``) when there is no harness, no diff to read, the call
     fails, or it comes back empty — the same fallback ladder the old
     ``local_run._describe`` used, just built from ``Changes``/the agent's own
     ``summary`` output instead of a board fetch, since a sink has no source of
     its own to ask for a task's title.
 
-    A connection with no checkout on this machine (a clone or a sandbox) simply
-    starts one rung down that ladder: the diff is the *only* thing here that
-    genuinely needs a working copy, and a mechanical description from what the
-    agent reported is a better answer than no PR at all."""
-    if harness is not None and folder:
-        diff = proc.run(["git", "diff", f"{changes.base_sha}...{changes.head_sha}"], cwd=folder).out
-        try:
-            text = harness.summarize(
-                _capped(diff), context=summary, model=model, folder=folder
-            ).strip()
-        except Exception:  # noqa: BLE001 - a summarizer failure falls back, never fails the PR
-            logger.warning(
-                "PR summary generation failed for %s; using a mechanical description",
-                ref,
-                exc_info=True,
-            )
-        else:
-            title, _, body = text.partition("\n")
-            if title.strip():
-                return _titled(ref, title), (body.strip() or summary)
+    ``fallback_reason`` is empty when the model wrote the description and a
+    short phrase naming the rung that was taken when it did not. The caller puts
+    it in the delivery summary: a mechanical description is a visible downgrade,
+    and a log line on a runner is not where the person who reads the PR looks.
+    """
+    reason = "no summarizer harness configured"
 
-            # The call worked but gave back nothing usable. The mechanical
-            # description below still opens the PR; it must not do so silently.
-            logger.warning(
-                "PR summary for %s came back unusable; using a mechanical description", ref
-            )
+    if harness is not None:
+        diff = _capped(_diff(proc, repo, changes, folder))
+
+        if not diff.strip():
+            reason = "no diff available"
+            logger.warning("no diff available for %s; using a mechanical description", ref)
+
+        else:
+            try:
+                # `summarize` runs a child process, so it needs a cwd that
+                # exists. A connection with no checkout has none — a scratch
+                # directory keeps the child out of whatever directory the
+                # listener itself happens to be sitting in.
+                with tempfile.TemporaryDirectory() as scratch:
+                    text = harness.summarize(
+                        diff, context=summary, model=model, folder=folder or scratch
+                    ).strip()
+
+            except Exception as exc:  # noqa: BLE001 - a summarizer failure falls back, never fails the PR
+                reason = f"summarizer failed ({type(exc).__name__})"
+                logger.warning(
+                    "PR summary generation failed for %s; using a mechanical description",
+                    ref,
+                    exc_info=True,
+                )
+
+            else:
+                title, _, body = text.partition("\n")
+                if title.strip():
+                    return _titled(ref, title), (body.strip() or summary), ""
+
+                # The call worked but gave back nothing usable. The mechanical
+                # description below still opens the PR; it must not do so
+                # silently.
+                reason = "summary came back unusable"
+                logger.warning(
+                    "PR summary for %s came back unusable; using a mechanical description", ref
+                )
 
     mechanical_title = summary.strip().splitlines()[0] if summary.strip() else ref
 
@@ -226,7 +279,7 @@ def _describe(
     parts = [summary.strip(), f"## Changes\n\n```\n{stat}\n```" if stat else ""]
     mechanical_body = "\n\n".join(filter(None, parts))
 
-    return _titled(ref, mechanical_title), (mechanical_body or summary)
+    return _titled(ref, mechanical_title), (mechanical_body or summary), reason
 
 
 class GitHubSink(Sink):
@@ -288,8 +341,9 @@ class GitHubSink(Sink):
                 sink=self.name, ok=False, summary="branch carries no verified changes"
             )
 
-        title, body = _describe(
+        title, body, fallback = _describe(
             proc,
+            repo,
             delivery.folder,
             changes,
             delivery.output.summary,
@@ -300,4 +354,9 @@ class GitHubSink(Sink):
         url = _open_pr(proc, repo, changes.branch, title, body)
         if url is None:
             return SinkResult(sink=self.name, ok=False, summary="could not open a pull request")
-        return SinkResult(sink=self.name, ok=True, summary="opened PR", url=url)
+
+        # A mechanical description says so where the person reading the task
+        # comment will see it, not only in the runner's log.
+        note = f"opened PR (mechanical description: {fallback})" if fallback else "opened PR"
+
+        return SinkResult(sink=self.name, ok=True, summary=note, url=url)

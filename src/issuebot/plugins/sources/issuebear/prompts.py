@@ -31,8 +31,8 @@ _OUTPUT_KIND_LINES: dict[OutputKind, str] = {
         "a human answering."
     ),
     "handoff": (
-        '`{"kind": "handoff", "assignee": "...", "note": "..."}` — you are handing '
-        "the task to someone else."
+        '`{"kind": "handoff", "assignee": "...", "note": "..."}` — you are handing the task '
+        "to someone else; assignee is the name or id of a member of this board."
     ),
 }
 
@@ -60,6 +60,50 @@ def render_response_instructions(permits: frozenset[OutputKind]) -> str:
         f"- {_OUTPUT_KIND_LINES[kind]}" for kind in get_args(OutputKind) if kind in permits
     )
     return _RESPONSE_BLOCK.format(env=RESPONSE_ENV, kinds=kinds)
+
+
+# The identity block, woven into every work prompt: who the agent is, and who
+# asked for the work. An agent that knows neither has to guess a name when it
+# hands the task back or opens a follow-up, and a guessed name is not a user id.
+_IDENTITY_SELF = "**You are {agent_name} on this board.** Your own board user id is `{agent_id}`."
+
+_IDENTITY_REQUESTER = """\
+**{requester_name} requested this task.** Their board user id is `{requester_id}`.
+
+- Handing the task back to them means `assignee_id="{requester_id}"` — that id, never a name.
+- A follow-up task you create must carry `requester_id="{requester_id}"` as well. Leave \
+yourself as its requester and both its plan and its questions come back to you, so no \
+person ever sees them."""
+
+
+def render_identity(
+    *,
+    agent_name: str = "",
+    agent_id: str = "",
+    requester_name: str = "",
+    requester_id: str = "",
+) -> str:
+    """The block telling the agent who it is and who asked for this task.
+
+    Each half is rendered only when its id is known, and an unknown display
+    name falls back to the id — the id is what the board actually wants in an
+    `assignee_id`/`requester_id` field, so a half with an id is still worth
+    saying. Everything unknown gives an empty block, which is how a launch
+    survives a board that would not answer either lookup.
+    """
+    lines: list[str] = []
+
+    if agent_id:
+        lines.append(_IDENTITY_SELF.format(agent_name=agent_name or agent_id, agent_id=agent_id))
+
+    if requester_id:
+        lines.append(
+            _IDENTITY_REQUESTER.format(
+                requester_name=requester_name or requester_id, requester_id=requester_id
+            )
+        )
+
+    return "\n\n".join(lines)
 
 
 # Injected when the agent id is known: tells the agent exactly how to self-assign.
@@ -101,6 +145,10 @@ def render_work_prompt(
     confirm: bool = True,
     mode: Mode = "build",
     permits: frozenset[OutputKind] = ALL_OUTPUT_KINDS,
+    agent_name: str = "",
+    agent_id: str = "",
+    requester_name: str = "",
+    requester_id: str = "",
 ) -> str:
     """Render the task-work prompt for the given reference and configuration.
 
@@ -109,20 +157,39 @@ def render_work_prompt(
     defaults to every kind so existing callers (still keyed off ``mode``, not a
     ``Job``) get the full instruction; a caller that already knows the run's
     actual latitude should pass it explicitly.
+
+    The four identity arguments name the agent and the task's requester
+    (:func:`render_identity`). They default to empty because only the source
+    can read them off the board, and neither lookup is worth failing a launch
+    over — a prompt with no identity block is a working prompt.
     """
     template = files("issuebot.plugins.sources.issuebear").joinpath(_TEMPLATES[mode]).read_text()
     response_instructions = render_response_instructions(permits)
+    identity = render_identity(
+        agent_name=agent_name,
+        agent_id=agent_id,
+        requester_name=requester_name,
+        requester_id=requester_id,
+    )
+    # The template holds the slot on a line of its own, so the block carries the
+    # blank lines that set it apart — and an empty block leaves none behind.
+    if identity:
+        identity = f"\n{identity}\n"
     # The respond template has no {confirm} field; str.format() would accept the extra
     # kwarg silently, but we keep the build/respond calls explicit.
     if mode == "respond":
         return template.format(
-            reference=reference, done=done, response_instructions=response_instructions
+            reference=reference,
+            done=done,
+            identity=identity,
+            response_instructions=response_instructions,
         )
     return template.format(
         reference=reference,
         done=done,
         confirm="yes" if confirm else "no",
         confirm_instruction=_CONFIRM_INSTRUCTIONS[bool(confirm)],
+        identity=identity,
         response_instructions=response_instructions,
     )
 

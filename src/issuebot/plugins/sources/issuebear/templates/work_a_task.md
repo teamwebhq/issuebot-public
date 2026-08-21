@@ -3,7 +3,7 @@ board's own **MCP server** connected — use it for all board interaction. There
 interactive human in your session; your only channel to people is the board's tools.
 
 Task: **{reference}** · done-mode: **{done}** · confirm before building: **{confirm}**.
-
+{identity}
 Use your **board-brainstorming**, **board-implementing** and **board-planning**
 skills to do this well.
 
