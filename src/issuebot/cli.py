@@ -174,7 +174,7 @@ def init(
 
     client = session.client(cfg)
     try:
-        work = client.get_my_work()
+        work = client.get_tasks(wait=0)
     except Exception as exc:  # noqa: BLE001 - surface any connection/auth failure
         typer.echo(f"Could not verify the PAT: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -578,7 +578,7 @@ def doctor(ctx: typer.Context) -> None:
 
     client = session.client(cfg)
     try:
-        work = client.get_my_work()
+        work = client.get_tasks(wait=0)
     except Exception as exc:  # noqa: BLE001 - surface any connection/auth failure
         typer.echo(f"PAT check failed: {exc}", err=True)
         raise typer.Exit(1) from exc

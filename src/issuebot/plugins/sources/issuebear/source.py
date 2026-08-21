@@ -82,16 +82,43 @@ def _display_name(user_id: str, members: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _human_id(user_id: str, members: list[dict[str, Any]]) -> str:
+    """The person behind a board user id: an agent's owner, or the id itself.
+
+    Agents belong to people, and only an agent's roster entry carries an
+    ``owner_id``, so following that field is how an agent id becomes a human
+    one. Followed repeatedly, because an agent may own an agent, and guarded
+    with ``seen`` so a cycle cannot spin.
+
+    An id the roster does not carry — a member who left, a roster the board
+    would not serve — answers with the id it was given, which is exactly what
+    every caller had before owners were on the roster.
+    """
+    seen: set[str] = set()
+    current = user_id
+
+    while current and current not in seen:
+        seen.add(current)
+        member = next((m for m in members if str(m.get("user_id", "")) == current), None)
+        owner = str(member.get("owner_id") or "") if member is not None else ""
+        if not owner:
+            return current
+        current = owner
+
+    return current
+
+
 class _Client(Protocol):
     """The slice of `IssuebotClient` this source actually calls.
 
     A structural type rather than `IssuebotClient` itself, so a test double
     needs only these methods."""
 
-    def wait_for_work(
-        self, *, timeout: int = ..., board_id: str | None = ...
+    def get_tasks(self, *, board_id: str | None = ..., wait: int = ...) -> list[dict[str, Any]]: ...
+    def get_mentions(
+        self, *, board_id: str | None = ..., wait: int = ...
     ) -> list[dict[str, Any]]: ...
-    def get_my_work(self, *, board_id: str | None = ...) -> list[dict[str, Any]]: ...
+    def claim_mention(self, notification_id: str) -> dict[str, Any]: ...
     def claim(
         self, task_id: str, *, install_id: str | None = ..., executor: str | None = ...
     ) -> dict[str, Any]: ...
@@ -190,50 +217,84 @@ class Issuebear(Source):
     # -- discover / claim / release -----------------------------------------
 
     def poll(self, *, timeout: int) -> list[WorkItem]:
-        """Long-poll for work on this connection's board, already scoped to it."""
-        return self._items(self._client.wait_for_work(timeout=timeout, board_id=self._board))
+        """The work outstanding on this connection's board: tasks and mentions.
 
-    def sweep(self) -> list[WorkItem]:
-        """The work still assigned to this agent on this connection's board.
+        Both lists are pure reads, so this answers the same items again until
+        something claims them. The tasks read carries the ``timeout`` — it is
+        the one that parks on the board's wake channel — and the mentions read
+        then drains what is outstanding without waiting a second time.
+        """
+        tasks = self._client.get_tasks(board_id=self._board, wait=timeout)
+        mentions = self._client.get_mentions(board_id=self._board, wait=0)
 
-        The same list, read the same way, as `poll`'s one-shot delivery
-        channel — so an item the board delivered while nothing was listening is
-        offered again by the runner's sweep."""
-        return self._items(self._client.get_my_work(board_id=self._board))
+        return self._items(tasks + mentions)
 
     def _items(self, payloads: list[dict[str, Any]]) -> list[WorkItem]:
         """Parse a board work list, scoped to this connection's board.
 
-        Both `/me/work` and `/me/work/wait` are agent-wide, so items are
-        filtered again here even though each request is also scoped
-        server-side — belt and braces against a server that doesn't."""
+        Both `/me/work/tasks` and `/me/work/mentions` are agent-wide, so items
+        are filtered again here even though each request is also scoped
+        server-side — belt and braces against a server that doesn't.
+
+        Work dropped by that filter is the one silent way a busy board looks
+        like an idle one, so it is logged. A list that is empty, or wholly for
+        this board, says nothing: those are the healthy cases.
+        """
         items = [WorkItem.from_api(p) for p in payloads]
-        return [item for item in items if item.for_source_ref(self._board)]
+        mine = [item for item in items if item.for_source_ref(self._board)]
+
+        if payloads and len(mine) < len(items):
+            logger.info(
+                "board offers %d work items, %d of them for board %s; the rest are for other "
+                "boards and are left alone",
+                len(items),
+                len(mine),
+                self._board,
+            )
+
+        return mine
 
     def claim(self, work: WorkItem) -> Claim | None:
-        """Take this task's run lock, or hand back the board's own non-locking
-        "responding" run for a mention.
+        """Take this work item's claim: a task's run lock, or a mention's
+        acknowledgement.
 
-        A mention is never a race to win — the board already delivered its
-        run — so this never returns ``None`` for one; its claim simply carries
-        no token when the board sent no responding run (an older server), and
-        ``release`` treats that as nothing to release. A locking claim
-        genuinely lost (``AlreadyClaimed``) and a transient failure (network,
-        gateway) both return ``None``: the item is redelivered by the next
-        ``poll`` either way, so the caller need not tell them apart.
+        Both lists the runner polls are level-triggered, so claiming is the
+        only thing that takes an item off them — and it is the same step for
+        both kinds, which is why there is one path here.
+
+        A mention's claim opens (or reuses) the board's non-locking
+        "responding" run. It carries no run when this agent already holds a
+        live working claim on the same task; the claim then carries an empty
+        token, which `release` treats as nothing to release and `run.execute`
+        as nothing to heartbeat.
+
+        A locking claim genuinely lost (``AlreadyClaimed``) and a transient
+        failure (network, gateway) both return ``None``: the item is on the
+        next poll's answer either way, so the caller need not tell them apart.
         """
-        if work.kind == "mention":
-            return Claim(work_id=work.task_id, token=work.run_id)
+        # Only a mention is claimed by notification, and a mention without one
+        # cannot be claimed at all — so it is left for a person to see.
+        notification_id = work.notification_id if work.kind == "mention" else None
+        if work.kind == "mention" and notification_id is None:
+            logger.warning("mention on %s carries no notification id; leaving it", work.ref)
+            return None
 
         try:
-            result = self._client.claim(
-                work.task_id,
-                install_id=self._install_id,
-                # The resolved name, so the board is told which environment ran
-                # the work even when the config left it to the one installed.
-                executor=maybe_executor_name(self._connection),
-            )
+            if notification_id is not None:
+                result = self._client.claim_mention(notification_id)
+            else:
+                result = self._client.claim(
+                    work.task_id,
+                    install_id=self._install_id,
+                    # The resolved name, so the board is told which environment ran
+                    # the work even when the config left it to the one installed.
+                    executor=maybe_executor_name(self._connection),
+                )
         except AlreadyClaimed:
+            # Another runner holds the lock, or an earlier crashed run still
+            # does. Either way this runner leaves the item alone — which looks
+            # like doing nothing, so it says so.
+            logger.info("claim refused for %s (run lock held elsewhere); skipping it", work.ref)
             return None
         except Exception as exc:  # noqa: BLE001 - claim failures are retried, not raised
             if is_transient(exc):
@@ -244,13 +305,14 @@ class Issuebear(Source):
                 logger.warning("claim failed for %s", work.ref, exc_info=True)
             return None
 
-        return Claim(work_id=work.task_id, token=result["run_id"])
+        return Claim(work_id=work.task_id, token=result.get("run_id") or "")
 
     def release(self, claim: Claim, response: Response) -> None:
         """Release the run lock, reporting how the run went.
 
-        A no-op when this claim carries no token — a mention the board never
-        opened a responding run for has nothing to release."""
+        A no-op when this claim carries no token — a mention claimed while this
+        agent already held a working claim on the same task has no responding
+        run of its own, so there is nothing to release."""
         if not claim.token:
             return
         status = "done" if response.status == "done" else "failed"
@@ -336,16 +398,22 @@ class Issuebear(Source):
             logger.warning("could not read the members of board %s", self._board, exc_info=True)
             return []
 
-    def _requester(
+    def _human_for(
         self, work: WorkItem, members: list[dict[str, Any]] | None = None
     ) -> tuple[str, str]:
-        """Who asked for this task: their board user id and display name, or
-        ``("", "")`` when the board cannot say.
+        """The person behind this task: their board user id and display name,
+        or ``("", "")`` when the board cannot say.
+
+        The task's requester when a person asked for it, and the human who owns
+        that agent when an agent did. An agent stays the requester of work it
+        raised — that is worth knowing, and the board keeps it — but a question
+        or a hand-back has to reach somebody who can answer it, and an agent
+        asking itself is a question nobody ever sees.
 
         One `get_task`, because the work item the board delivers carries no
         requester. Both features that need one come through here — the launch
         prompt's identity block, and a hand-off the agent aimed at itself — so
-        a task is read once per use and "what does `requester_id` mean" is
+        a task is read once per use and "who does this task belong to" is
         answered in one place.
 
         Pass ``members`` when the caller already holds the roster (a launch
@@ -363,31 +431,34 @@ class Issuebear(Source):
             return "", ""
 
         roster = self._roster() if members is None else members
+        human_id = _human_id(requester_id, roster)
 
-        return requester_id, _display_name(requester_id, roster)
+        return human_id, _display_name(human_id, roster)
 
     def _redirect_self_handoff(self, work: WorkItem) -> str | None:
-        """Where a hand-off the agent aimed at itself goes instead: the task's
-        requester, or nowhere.
+        """Where a hand-off the agent aimed at itself goes instead: the person
+        behind the task, or nowhere.
 
         The agent is the one thing on the board that cannot receive a hand-off
         from itself — the session that would pick the task up is the one
-        ending — so the person who asked for the work gets it back. With
-        nobody to send it to (a task the board records no requester for, or
-        one this agent requested itself) the task keeps the assignee it has.
+        ending — so the person the work belongs to gets it back. That is the
+        requester, or the requester's owner when this agent raised the task
+        itself. With nobody to send it to (a task the board records no
+        requester for, or an agent requester with no owner) the task keeps the
+        assignee it has.
 
         Either way one comment says what happened, and nothing raises:
         `runner._finish` calls `apply` before it reports, so an exception here
         would cost the run its closing report.
         """
-        requester_id, requester_name = self._requester(work)
+        requester_id, requester_name = self._human_for(work)
 
         if requester_id and requester_id != self._agent_id:
-            logger.info("hand-off of %s named this agent; redirecting to its requester", work.ref)
+            logger.info("hand-off of %s named this agent; redirecting to its owner", work.ref)
             self.say(work, messages.self_handoff(requester_name or requester_id))
             return requester_id
 
-        logger.warning("hand-off of %s named this agent and it has no requester", work.ref)
+        logger.warning("hand-off of %s named this agent and it has nobody behind it", work.ref)
         self.say(work, messages.self_handoff(None))
 
         return None
@@ -447,9 +518,10 @@ class Issuebear(Source):
             )
         else:
             # One roster read serves both halves of the identity block: the
-            # agent's own display name, and the requester's.
+            # agent's own display name, and the name of the person the task
+            # belongs to.
             members = self._roster()
-            requester_id, requester_name = self._requester(work, members)
+            requester_id, requester_name = self._human_for(work, members)
 
             rendered = prompts.render_work_prompt(
                 reference=work.ref,

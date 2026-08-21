@@ -60,10 +60,9 @@ def test_a_mention_cannot_produce_changes(source: Source) -> None:
 
 
 def test_a_source_that_does_not_lock_still_returns_a_claim(source: Source) -> None:
-    """A mention is delivered with the board's own non-locking run — never a
-    race to win, so `claim` never returns `None` for one, and `release` has
-    whatever it takes to make releasing it a no-op."""
-    claim = source.claim(mention(run_id=None))
+    """A mention is never a race to win, so `claim` never returns `None` for
+    one, and `release` has whatever it takes to make releasing it a no-op."""
+    claim = source.claim(mention())
     assert claim is not None
     source.release(claim, Response(status="done"))  # must not raise
 

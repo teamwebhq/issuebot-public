@@ -173,30 +173,63 @@ class IssuebotClient:
         """Disconnect this agent from a board (DELETE /boards/{id}/agent-connection)."""
         self._json(self._http.delete(f"/boards/{board_id}/agent-connection"))
 
-    def get_my_work(self, *, board_id: str | None = None) -> list[dict[str, Any]]:
-        """Return the list of tasks currently waiting for this agent.
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
+        """The tasks outstanding against this agent (GET /me/work/tasks).
 
-        Pass ``board_id`` to restrict results to a single board.
+        A pure read at every ``wait``: nothing is consumed and nothing is
+        acknowledged, so the same answer comes back until something claims the
+        work. The list carries the tasks assigned to this agent and the
+        board-pool work it is responsible for, and it re-lists a task whose
+        previous run was abandoned.
+
+        ``wait`` parks the request on the board's wake channel for up to that
+        many seconds (0 answers at once). A 204 means nothing is outstanding.
+
+        Pass ``board_id`` to restrict the read to a single board.
         """
-        params = {"board_id": board_id} if board_id is not None else None
-        return self._json(self._http.get("/me/work", params=params))
+        return self._work("/me/work/tasks", board_id=board_id, wait=wait)
 
-    def wait_for_work(
-        self, *, timeout: int = 25, board_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Long-poll for work; return the task list, or ``[]`` on a 204.
+    def get_mentions(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
+        """The mentions outstanding against this agent (GET /me/work/mentions).
 
-        Pass ``board_id`` to restrict the poll to a single board.
+        The same pure read as :meth:`get_tasks`, over the other resource: a
+        mention stays listed until :meth:`claim_mention` acknowledges it, and
+        is listed again if the response was abandoned. Every item carries a
+        ``notification_id``, which is what the claim needs.
+
+        Pass ``board_id`` to restrict the read to a single board.
         """
-        params: dict[str, Any] = {"timeout": timeout}
+        return self._work("/me/work/mentions", board_id=board_id, wait=wait)
+
+    def _work(self, path: str, *, board_id: str | None, wait: int) -> list[dict[str, Any]]:
+        """Read one of the two work lists, treating a 204 as an empty list.
+
+        The HTTP timeout is the server-side ``wait`` plus headroom, so a poll
+        that parks for the full period is answered rather than torn down by the
+        client a moment before the board replies.
+        """
+        params: dict[str, Any] = {"wait": wait}
         if board_id is not None:
             params["board_id"] = board_id
 
-        resp = self._http.get("/me/work/wait", params=params, timeout=timeout + 10)
+        resp = self._http.get(path, params=params, timeout=wait + 10)
         if resp.status_code == 204:
             return []
 
         return self._json(resp)
+
+    def claim_mention(self, notification_id: str) -> dict[str, Any]:
+        """Claim one mention, returning ``{notification_id, task_id, run_id}``.
+
+        Stamps the acknowledgement — which is what takes the mention off
+        :meth:`get_mentions` — and opens or reuses the board's non-locking
+        "responding" run. Idempotent, so a retry is safe.
+
+        ``run_id`` comes back null in exactly one case: this agent already
+        holds a live working claim on the same task, so there is no separate
+        responding run to heartbeat or release.
+        """
+        return self._json(self._http.post(f"/me/work/mentions/{notification_id}/claim"))
 
     def claim(
         self, task_id: str, *, install_id: str | None = None, executor: str | None = None

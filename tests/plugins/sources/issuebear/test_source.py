@@ -39,11 +39,35 @@ def test_poll_scopes_to_this_connections_board():
     items = _source(api).poll(timeout=1)
     assert [i.task_id for i in items] == ["t1"]
     assert api.wait_board_ids == ["b"]
+    assert api.mention_board_ids == ["b"]
+
+
+def test_poll_returns_tasks_and_mentions_together():
+    """Two board resources, one answer: the listener is handed everything
+    outstanding without knowing there were two reads."""
+    api = FakeApi(
+        work_items=[
+            {"task_id": "t1", "board_id": "b"},
+            {"task_id": "t2", "board_id": "b", "kind": "mention", "notification_id": "n1"},
+        ]
+    )
+
+    items = _source(api).poll(timeout=1)
+
+    assert [(i.task_id, i.kind) for i in items] == [("t1", "assigned"), ("t2", "mention")]
+
+
+def test_poll_carries_the_notification_a_mention_is_claimed_by():
+    api = FakeApi(
+        work_items=[{"task_id": "t2", "board_id": "b", "kind": "mention", "notification_id": "n1"}]
+    )
+
+    assert [i.notification_id for i in _source(api).poll(timeout=1)] == ["n1"]
 
 
 def test_poll_filters_out_items_for_another_board():
-    """/me/work is agent-wide; belt-and-braces even though board_id already
-    scoped the request server-side."""
+    """Both work lists are agent-wide; belt-and-braces even though board_id
+    already scoped each request server-side."""
     api = FakeApi(work_items=[{"task_id": "t1", "board_id": "OTHER"}])
     assert _source(api).poll(timeout=1) == []
 
@@ -60,20 +84,36 @@ def test_claiming_an_assignment_locks_it_on_the_board():
     assert api.claims == ["t1"]
 
 
-def test_claiming_a_mention_never_calls_the_board():
-    """The board already opened the responding run; claiming one is not a
-    race, so this never touches the network."""
-    api = FakeApi()
-    claim = _source(api).claim(mention(run_id="r-resp"))
+def test_claiming_a_mention_acknowledges_its_notification():
+    """The claim is what takes a mention off the board's list, and the run it
+    opens is what the claim then carries."""
+    api = FakeApi(run_id="r-resp")
+
+    claim = _source(api).claim(mention(notification_id="n1"))
+
     assert claim == Claim(work_id="t1", token="r-resp")
-    assert api.claims == []
+    assert api.mention_claims == ["n1"]
+    assert api.claims == []  # no run lock: a mention is not a race
 
 
-def test_claiming_a_mention_with_no_run_id_still_returns_a_claim():
-    """Older servers omit the responding run — the claim carries no token,
-    and release() treats that as nothing to release."""
-    claim = _source().claim(mention(run_id=None))
-    assert claim == Claim(work_id="t1", token=None)
+def test_a_mention_claim_with_no_responding_run_carries_no_token():
+    """The board opens no responding run when this agent already holds a
+    working claim on the task, and a tokenless claim releases nothing."""
+    api = FakeApi(run_id=None)
+    source = _source(api)
+
+    claim = source.claim(mention(notification_id="n1"))
+    assert claim == Claim(work_id="t1", token="")
+
+    source.release(claim, Response(status="done"))
+    assert api.releases == []
+
+
+def test_a_mention_with_no_notification_is_left_alone():
+    """It cannot be claimed, so running it would never acknowledge it."""
+    api = FakeApi()
+    assert _source(api).claim(mention(notification_id=None)) is None
+    assert api.mention_claims == []
 
 
 def test_losing_the_claim_race_returns_none():
@@ -99,12 +139,6 @@ def test_release_reports_done_or_failed_with_the_result_text():
     ]
 
 
-def test_release_with_no_token_does_nothing():
-    api = FakeApi()
-    _source(api).release(Claim(work_id="t1", token=None), Response(status="done"))
-    assert api.releases == []
-
-
 # ---------------------------------------------------------------------------
 # say / apply / finish
 # ---------------------------------------------------------------------------
@@ -119,7 +153,8 @@ def test_say_posts_a_prefixed_comment():
 # The board roster the hand-off tests resolve against.
 _ROSTER = [
     {"name": "Sam Vimes", "user_id": "u-sam", "kind": "human"},
-    {"name": "Hetzner", "user_id": "u-hetzner", "kind": "claude"},
+    # Agents carry their owner on the roster; people do not.
+    {"name": "Hetzner", "user_id": "u-hetzner", "kind": "claude", "owner_id": "u-sam"},
 ]
 
 _SAM_ID = "8f1d0b6e-2c47-4a1e-9c3b-0a5d6e7f8a90"
@@ -192,6 +227,20 @@ def test_a_handoff_to_the_agent_itself_goes_to_the_requester_instead():
 
     assert api.updates == [("t1", {"assignee_id": "u-sam"})]
     assert len(api.comments) == 1
+    assert "Sam Vimes" in api.comments[0][1]
+
+
+def test_a_handoff_on_the_agents_own_task_goes_to_the_agents_owner():
+    """An agent stays the requester of the follow-ups it raises, so the task it
+    hands back names itself — the person to hand it to is the human who owns
+    the agent, which only the roster can say."""
+    api = FakeApi(
+        members=_ROSTER, task={"id": "t1", "reference": "ISS-1", "requester_id": "u-hetzner"}
+    )
+
+    _source(api, agent_id="u-hetzner").apply(work(), Handoff(assignee="Hetzner", note="over to me"))
+
+    assert api.updates == [("t1", {"assignee_id": "u-sam"})]
     assert "Sam Vimes" in api.comments[0][1]
 
 
@@ -416,18 +465,11 @@ def test_heartbeat_delegates_to_the_client():
     assert api.heartbeats == ["r1"]
 
 
-# ---------------------------------------------------------------------------
-# sweep
-# ---------------------------------------------------------------------------
+def test_losing_the_claim_race_is_reported(caplog):
+    """A stale lock from a crashed run stops every poll silently otherwise."""
+    api = FakeApi(claim_error=AlreadyClaimed("t1"))
 
+    with caplog.at_level("INFO", logger="issuebot"):
+        assert _source(api).claim(work()) is None
 
-def test_sweep_returns_the_standing_work_for_this_board():
-    """The board's delivery channel is one-shot, so the standing list is what
-    finds work no delivery ever offered."""
-    api = FakeApi(work_items=[{"task_id": "t1", "board_id": "b"}])
-    assert [i.task_id for i in _source(api).sweep()] == ["t1"]
-
-
-def test_sweep_filters_out_items_for_another_board():
-    api = FakeApi(work_items=[{"task_id": "t1", "board_id": "OTHER"}])
-    assert _source(api).sweep() == []
+    assert "run lock held elsewhere" in caplog.text

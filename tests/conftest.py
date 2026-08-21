@@ -49,7 +49,7 @@ def work(
     *,
     board_id: str | None = "b",
     kind: str = "assigned",
-    run_id: str | None = None,
+    notification_id: str | None = None,
     actor_name: str | None = None,
     comment_excerpt: str | None = None,
 ) -> WorkItem:
@@ -59,7 +59,7 @@ def work(
         reference=reference,
         source_ref=board_id,
         kind="mention" if kind == "mention" else "assigned",
-        run_id=run_id,
+        notification_id=notification_id,
         actor_name=actor_name,
         comment_excerpt=comment_excerpt,
     )
@@ -69,6 +69,8 @@ def mention(task_id: str = "t1", reference: str | None = "ISS-1", **kw: Any) -> 
     """A mention work item."""
     kw.setdefault("actor_name", "Ada")
     kw.setdefault("comment_excerpt", "what do you think?")
+    # A mention is claimed by its notification, so every one carries an id.
+    kw.setdefault("notification_id", "n1")
     return work(task_id, reference, kind="mention", **kw)
 
 
@@ -294,7 +296,7 @@ class FakeApi:
         work_items: list[dict[str, Any]] | None = None,
         claim_error: Exception | None = None,
         connect_error: Exception | None = None,
-        run_id: str = "r1",
+        run_id: str | None = "r1",
         agent_id: str | None = None,
         members: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -322,28 +324,49 @@ class FakeApi:
         self.heartbeats: list[str] = []
         self.sandbox_reports: list[dict[str, Any]] = []
         self.wait_board_ids: list[str | None] = []
+        self.mention_board_ids: list[str | None] = []
+        self.mention_claims: list[str] = []
         self.member_lookups: list[str] = []
         self.telemetry: list[dict[str, Any]] = []
         self.released = threading.Event()
 
-    # -- work delivery ------------------------------------------------------
+    # -- the two work lists --------------------------------------------------
+    #
+    # The board lists work until it is claimed. These serve the scripted items
+    # on the first read and nothing after, which is what a listener that claims
+    # everything it is offered sees.
 
-    def wait_for_work(
-        self, *, timeout: int = 25, board_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Serve the scripted items once, then block briefly so the poll loop
-        doesn't spin."""
+    def _scripted(self, *, mentions: bool) -> list[dict[str, Any]]:
+        """The scripted items of one kind, served once."""
+        wanted = [item for item in self._work_items if (item.get("kind") == "mention") is mentions]
+        return wanted if not self._served.is_set() else []
+
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
+        """The outstanding tasks, then nothing — blocking briefly once served so
+        the poll loop doesn't spin."""
         self.wait_board_ids.append(board_id)
-        if not self._served.is_set():
-            self._served.set()
-            return list(self._work_items)
-        time.sleep(min(timeout, 0.05))
-        return []
+        tasks = self._scripted(mentions=False)
 
-    def get_my_work(self, *, board_id: str | None = None) -> list[dict[str, Any]]:
-        return list(self._work_items)
+        # Set after both reads have been served, so one poll sees both lists.
+        if self._served.is_set():
+            time.sleep(min(wait, 0.05))
+
+        return tasks
+
+    def get_mentions(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
+        """The outstanding mentions, then nothing."""
+        self.mention_board_ids.append(board_id)
+        mentions = self._scripted(mentions=True)
+        self._served.set()
+        return mentions
 
     # -- the run lock -------------------------------------------------------
+
+    def claim_mention(self, notification_id: str) -> dict[str, Any]:
+        """Acknowledge a mention and open its responding run."""
+        self.mention_claims.append(notification_id)
+        self.calls.append(("claim_mention", notification_id))
+        return {"notification_id": notification_id, "task_id": "t1", "run_id": self._run_id}
 
     def claim(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         self.claims.append(task_id)
@@ -479,8 +502,8 @@ class OkClient:
     (`tests/plugins/sources/<name>/`), and asserting it here would make every
     CLI test a test of one plugin's REST layer."""
 
-    def get_my_work(self, *, board_id: str | None = None) -> list[Any]:
-        """No work waiting, reported successfully."""
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list[Any]:
+        """No tasks outstanding, reported successfully."""
         return []
 
     def close(self) -> None:

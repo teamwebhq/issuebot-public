@@ -444,8 +444,9 @@ def test_a_claimed_run_is_kept_alive_through_the_sources_heartbeat():
 
 
 def test_no_run_id_skips_the_heartbeat():
-    """A mention's non-locking session carries no run id — nothing to
-    heartbeat, so the thread must not even start."""
+    """A mention claimed while the agent already holds a working claim on the
+    task gets no responding run of its own — nothing to heartbeat, so the
+    thread must not even start."""
     source = FakeApi()
     _run(source=source, heartbeat_interval=0.01)  # _job() carries no run_id
     assert source.heartbeats == []

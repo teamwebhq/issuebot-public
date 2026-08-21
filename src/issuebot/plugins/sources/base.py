@@ -72,9 +72,14 @@ class SourceClient(Protocol):
 
     # -- proving and closing the connection to the source --------------------
 
-    def get_my_work(self, *, board_id: str | None = ...) -> list[dict[str, Any]]:
-        """Work waiting for this agent. `init` and `doctor` call it to prove the
-        credentials: answering at all is the check."""
+    def get_tasks(self, *, board_id: str | None = ..., wait: int = ...) -> list[dict[str, Any]]:
+        """The tasks outstanding against this agent, read without changing any
+        of them. `init` and `doctor` call it to prove the credentials:
+        answering at all is the check, and a check must not spend the work it
+        counts.
+
+        ``wait`` is how long the source may park the read before answering; a
+        credential check passes 0 and gets an answer at once."""
         ...
 
     def close(self) -> None:
@@ -224,26 +229,20 @@ class Source(ABC):
 
     @abstractmethod
     def poll(self, *, timeout: int) -> list[WorkItem]:
-        """Long-poll for work items waiting on this source."""
+        """The work outstanding on this source, waiting up to ``timeout``
+        seconds for some to appear.
 
-    def sweep(self) -> list[WorkItem]:
-        """The standing list of work waiting for this agent, for a source that
-        can answer one.
-
-        Beside :meth:`poll` rather than inside it: a delivery channel says what
-        arrived, this says what is *still* assigned. The runner sweeps on an
-        interval so work a one-shot delivery missed — delivered while the poll
-        loop was erroring, or never delivered per item at all — is found anyway.
-        Concrete with an empty default: a source with only a delivery channel
-        implements nothing and keeps working unchanged."""
-        return []
+        The answer is a state, not a delivery: it is everything still waiting,
+        it costs nothing to ask for, and asking again gives the same items
+        back. :meth:`claim` is what acknowledges an item and takes it off the
+        answer, so a poll the runner could not act on loses nothing."""
 
     @abstractmethod
     def claim(self, work: WorkItem) -> Claim | None:
-        """Take this work item's lock, or ``None`` if it could not be taken —
-        another runner won the race, or the attempt itself failed. Either way
-        the item will be offered again by a later :meth:`poll`, so the caller
-        need not tell the two apart."""
+        """Acknowledge this work item and take whatever lock it has, or
+        ``None`` if it could not be taken — another runner won the race, or the
+        attempt itself failed. Either way the item is on the next :meth:`poll`
+        answer, so the caller need not tell the two apart."""
 
     @abstractmethod
     def release(self, claim: Claim, response: Response) -> None:

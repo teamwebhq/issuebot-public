@@ -28,7 +28,7 @@ _TASK = {"id": "t1", "reference": "ISS-1", "requester_id": "u-req"}
 
 
 class ScriptedApi:
-    """Serves one claimable work item on the first wait, then [] forever.
+    """Serves one claimable work item on the first poll, then [] forever.
 
     Records claims and releases. A ``threading.Event`` signals once a task has
     been released, so the test can wait deterministically instead of sleeping.
@@ -46,29 +46,43 @@ class ScriptedApi:
         # cannot show: "decision applied *before* the claim is released" is an
         # ordering claim, and two separate lists both being non-empty is not.
         self.calls: list[str] = []
-        # Records the board_id kwarg passed to each wait_for_work call.
+        # Records the board_id kwarg passed to each task read.
         self.wait_board_ids: list[str | None] = []
         self.execution_patches: list[dict[str, Any]] = []
         # Records the attribution kwargs passed to each claim call.
         self.claim_kwargs: list[dict[str, Any]] = []
+        # Mention claims, and the responding run the board opens for one. Set
+        # `mention_run_id` to None for the board that opens no separate run.
+        self.mention_claims: list[str] = []
+        self.mention_run_id: str | None = "r-resp"
 
     # --- agent work contract -------------------------------------------------
 
-    def wait_for_work(
-        self, *, timeout: int = 25, board_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
         self.wait_board_ids.append(board_id)
         if not self._served.is_set():
             self._served.set()
             return [self._work_item]
-        # Block for ~timeout so the loop doesn't busy-spin, returning nothing.
-        time.sleep(min(timeout, 0.05))
+        # Block for ~wait so the loop doesn't busy-spin, returning nothing.
+        time.sleep(min(wait, 0.05))
+        return []
+
+    def get_mentions(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
+        """No mentions outstanding: these doubles script tasks."""
         return []
 
     def claim(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         self.claims.append(task_id)
         self.claim_kwargs.append(kwargs)
         return {"run_id": "r1", "task_id": task_id}
+
+    def claim_mention(self, notification_id: str) -> dict[str, Any]:
+        self.mention_claims.append(notification_id)
+        return {
+            "notification_id": notification_id,
+            "task_id": "t1",
+            "run_id": self.mention_run_id,
+        }
 
     # --- task operations used by process_task --------------------------------
 
@@ -423,16 +437,17 @@ def test_the_listener_runs_work_through_its_environment(monkeypatch) -> None:
 
 
 def test_unclaimable_work_runs_without_taking_a_run_lock(monkeypatch) -> None:
-    """A mention is delivered with the board's own non-locking run; the listener
-    never claims, and releases that run from the outcome."""
+    """A mention's claim takes no run lock: it acknowledges the notification and
+    opens the board's own non-locking run, which is released from the outcome."""
     ex = StubEnvironment()
-    item = _work_item("t1", "ISS-1", kind="mention", run_id="r-resp")
+    item = _work_item("t1", "ISS-1", kind="mention", notification_id="n1")
     api = ScriptedApi(item)
     listener = ProjectListener(wiring(_PROJECT, api=api, environment=ex))
 
     listener._process(item)
 
     assert api.claims == []
+    assert api.mention_claims == ["n1"]
     assert [r["work"].kind for r in ex.runs] == ["mention"]
     assert api.releases == [{"run_id": "r-resp", "status": "done", "note": None}]
 
@@ -441,7 +456,7 @@ def test_a_failed_unclaimed_run_is_released_as_failed() -> None:
     """The mention path used to release a hardcoded 'done', so a failed sandbox
     reported success."""
     ex = StubEnvironment(Response(status="failed", result_text="sandbox run crashed"))
-    item = _work_item("t1", "ISS-1", kind="mention", run_id="r-resp")
+    item = _work_item("t1", "ISS-1", kind="mention", notification_id="n1")
     api = ScriptedApi(item)
     listener = ProjectListener(wiring(_PROJECT, api=api, environment=ex))
 
@@ -450,11 +465,13 @@ def test_a_failed_unclaimed_run_is_released_as_failed() -> None:
     assert api.releases == [{"run_id": "r-resp", "status": "failed", "note": "sandbox run crashed"}]
 
 
-def test_an_unclaimed_item_without_a_run_id_releases_nothing() -> None:
-    """Older servers omit the responding run; there is then nothing to release."""
+def test_a_mention_claim_with_no_responding_run_releases_nothing() -> None:
+    """The board opens no separate run when this agent already holds a working
+    claim on the task; the mention still runs, and there is nothing to release."""
     ex = StubEnvironment()
-    item = _work_item("t1", "ISS-1", kind="mention")
+    item = _work_item("t1", "ISS-1", kind="mention", notification_id="n1")
     api = ScriptedApi(item)
+    api.mention_run_id = None
     listener = ProjectListener(wiring(_PROJECT, api=api, environment=ex))
 
     listener._process(item)
@@ -470,7 +487,7 @@ def test_the_agent_id_reaches_the_run() -> None:
     both need it, so a listener told one explicitly folds it in there — but what
     matters is that it comes out the far end, in the prompt the run launches
     with."""
-    item = _work_item("t1", "ISS-1", kind="mention", run_id="r-resp")
+    item = _work_item("t1", "ISS-1", kind="mention", notification_id="n1")
     ex = StubEnvironment()
     api = ScriptedApi(item)
     listener = ProjectListener(
@@ -630,7 +647,7 @@ def test_stop_aborts_every_in_flight_run() -> None:
 
 
 class _ConcurrentApi(ScriptedApi):
-    """Serves several claimable work items on the first wait (instead of
+    """Serves several claimable work items on the first poll (instead of
     ScriptedApi's single item), each claimed with its own run_id, and exposes
     an Event set once every one of them has been released."""
 
@@ -639,14 +656,12 @@ class _ConcurrentApi(ScriptedApi):
         self._work_items = [_as_payload(w) for w in work_items]
         self.all_released = threading.Event()
 
-    def wait_for_work(
-        self, *, timeout: int = 25, board_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
         self.wait_board_ids.append(board_id)
         if not self._served.is_set():
             self._served.set()
             return list(self._work_items)
-        time.sleep(min(timeout, 0.05))
+        time.sleep(min(wait, 0.05))
         return []
 
     def serve(self, *work_items: Any) -> None:
@@ -947,7 +962,7 @@ def test_publish_skips_telemetry_until_registered(tmp_path: Path) -> None:
 
 
 def test_listener_polls_scoped_to_its_board() -> None:
-    """The listener passes its connection's board_id into every wait_for_work call."""
+    """The listener passes its connection's board_id into every work read."""
     work = _work_item()
     api = ScriptedApi(work)
     listener = ProjectListener(wiring(_PROJECT, api=api), wait_timeout=1)
@@ -958,8 +973,8 @@ def test_listener_polls_scoped_to_its_board() -> None:
     listener.stop()
     thread.join(timeout=2)
 
-    # The board_id passed to wait_for_work must match the connection's board.
-    assert api.wait_board_ids, "wait_for_work was never called"
+    # The board_id passed to the task read must match the connection's board.
+    assert api.wait_board_ids, "the board was never read"
     assert api.wait_board_ids[0] == "b"
 
 
@@ -1036,9 +1051,13 @@ class RecordingApi:
         """Record a board disconnect."""
         self.calls.append(("disconnect", board_id))
 
-    def wait_for_work(self, *, timeout: int = 25, board_id: str | None = None) -> list:
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list:
         """Return no work; sleep briefly so listener threads don't spin."""
-        time.sleep(min(timeout, 0.01))
+        time.sleep(min(wait, 0.01))
+        return []
+
+    def get_mentions(self, *, board_id: str | None = None, wait: int = 0) -> list:
+        """Return no mentions."""
         return []
 
     def wait_for_commands(self, *, install_id: str | None = None, timeout: int = 25) -> list:
@@ -1595,74 +1614,49 @@ def test_stop_releases_a_listener_waiting_for_a_slot() -> None:
     assert api.claims == []  # never claimed: nothing to strand
 
 
-class StandingWorkApi(ScriptedApi):
-    """A board that delivers nothing, but keeps the item on the standing list.
+class OutstandingWorkApi(ScriptedApi):
+    """A board that lists its item on every read until a claim takes it, and
+    refuses the first claim.
 
-    What a board level assignment looks like: nothing ever fires a per-task
-    delivery, so the work is only found by asking what is still assigned."""
-
-    def wait_for_work(
-        self, *, timeout: int = 25, board_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        self.wait_board_ids.append(board_id)
-        time.sleep(min(timeout, 0.05))
-        return []
-
-    def get_my_work(self, *, board_id: str | None = None) -> list[dict[str, Any]]:
-        return [self._work_item]
-
-
-class FlakyBoardApi(ScriptedApi):
-    """A board whose first poll fails, and which only lists the work after that.
-
-    The delivery arrived while the board was unreachable, and the board never
-    sends it a second time."""
+    The level-triggered contract in one double: reading changes nothing, so the
+    first poll's answer going unrun costs nothing — the item is on the next
+    one."""
 
     def __init__(self, work_item: Any) -> None:
         super().__init__(work_item)
-        self.failed = False
+        self.taken = False
 
-    def wait_for_work(
-        self, *, timeout: int = 25, board_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
         self.wait_board_ids.append(board_id)
-        if not self.failed:
-            self.failed = True
+        if self.taken:
+            time.sleep(min(wait, 0.05))
+            return []
+
+        return [self._work_item]
+
+    def claim(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+        self.claims.append(task_id)
+        self.claim_kwargs.append(kwargs)
+        if len(self.claims) == 1:
             raise RuntimeError("board is down")
-        time.sleep(min(timeout, 0.05))
-        return []
 
-    def get_my_work(self, *, board_id: str | None = None) -> list[dict[str, Any]]:
-        return [self._work_item] if self.failed else []
+        self.taken = True
+        return {"run_id": "r1", "task_id": task_id}
 
 
-def test_work_only_on_the_standing_list_is_claimed_and_run() -> None:
-    api = StandingWorkApi(_work_item())
+def test_work_the_listener_could_not_run_is_offered_again() -> None:
+    """The property the periodic sweep used to provide: a poll is a pure read,
+    so an item nothing managed to claim is simply on the next answer."""
+    api = OutstandingWorkApi(_work_item())
     listener = ProjectListener(
         wiring(_PROJECT, api=api, environment=StubEnvironment()),
         wait_timeout=1,
     )
 
     thread = _run_listener(listener)
-    assert api.released.wait(timeout=2), "standing work was never processed"
+    assert api.released.wait(timeout=5), "the item was never offered a second time"
     listener.stop()
     thread.join(timeout=2)
 
-    assert api.claims == ["t1"]
+    assert api.claims == ["t1", "t1"]
     assert api.releases == [{"run_id": "r1", "status": "done", "note": None}]
-
-
-def test_standing_work_is_picked_up_once_a_failed_poll_recovers() -> None:
-    api = FlakyBoardApi(_work_item())
-    listener = ProjectListener(
-        wiring(_PROJECT, api=api, environment=StubEnvironment()),
-        wait_timeout=1,
-    )
-
-    thread = _run_listener(listener)
-    # The listener backs off for 3s after a failed poll, so allow for that.
-    assert api.released.wait(timeout=8), "work missed by the delivery was never processed"
-    listener.stop()
-    thread.join(timeout=2)
-
-    assert api.claims == ["t1"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -858,6 +859,28 @@ def test_doctor_ok(config_path: Path):
     result = runner.invoke(cli.app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "ok" in result.output.lower()
+
+
+def test_doctor_reports_a_pat_the_board_refuses(config_path: Path):
+    """The board refusing the task read is the finding, not a reason to ask a
+    second endpoint."""
+    save_config(_base_config(), config_path)
+
+    class _Refused(Exception):
+        status = 401
+
+    class _BadPat:
+        def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list[Any]:
+            """The board refuses this PAT."""
+            raise _Refused("bad token")
+
+        def close(self) -> None:
+            """No-op for the stub."""
+
+    result = cli_runner(_BadPat()).invoke(cli.app, ["doctor"])
+
+    assert result.exit_code == 1
+    assert "PAT check failed" in result.output
 
 
 def test_doctor_without_config_exits_1(config_path: Path):

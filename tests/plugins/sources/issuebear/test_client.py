@@ -25,45 +25,113 @@ def _client(handler, **settings) -> IssuebotClient:
     )
 
 
-def test_bearer_header_and_get_my_work():
+# The two work reads are the same shape over different resources, so their
+# shared promises — path, params, 204 — are proved once for both.
+WORK_READS = [("get_tasks", "/api/me/work/tasks"), ("get_mentions", "/api/me/work/mentions")]
+
+
+@pytest.mark.parametrize(("method", "path"), WORK_READS)
+def test_a_work_read_asks_its_own_path_with_board_id_and_wait(method: str, path: str):
     seen: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["auth"] = request.headers.get("authorization", "")
         seen["path"] = request.url.path
-        return httpx.Response(200, json=[{"task_id": "t1"}, {"task_id": "t2"}])
+        seen["board_id"] = request.url.params.get("board_id", "")
+        seen["wait"] = request.url.params.get("wait", "")
+        return httpx.Response(200, json=[{"task_id": "t1"}])
 
     client = _client(handler)
     try:
-        work = client.get_my_work()
+        work = getattr(client, method)(board_id="b-5", wait=5)
     finally:
         client.close()
 
     assert seen["auth"] == "Bearer secret-token"
-    assert seen["path"] == "/api/me/work"
-    assert work == [{"task_id": "t1"}, {"task_id": "t2"}]
+    assert seen["path"] == path
+    assert seen["board_id"] == "b-5"
+    assert seen["wait"] == "5"
+    assert work == [{"task_id": "t1"}]
 
 
-def test_wait_for_work_204_returns_empty_list():
+@pytest.mark.parametrize(("method", "path"), WORK_READS)
+def test_a_work_read_treats_204_as_nothing_outstanding(method: str, path: str):
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == path
         return httpx.Response(204)
 
     client = _client(handler)
     try:
-        assert client.wait_for_work(timeout=5) == []
+        assert getattr(client, method)(wait=5) == []
     finally:
         client.close()
 
 
-def test_wait_for_work_200_returns_list():
+@pytest.mark.parametrize(("method", "path"), WORK_READS)
+def test_a_work_read_without_board_id_omits_the_param(method: str, path: str):
+    seen: dict[str, dict[str, str]] = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/me/work/wait"
-        assert request.url.params.get("timeout") == "5"
-        return httpx.Response(200, json=[{"task_id": "t9"}])
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(204)
 
     client = _client(handler)
     try:
-        assert client.wait_for_work(timeout=5) == [{"task_id": "t9"}]
+        getattr(client, method)(wait=1)
+    finally:
+        client.close()
+
+    assert "board_id" not in seen["params"]
+
+
+@pytest.mark.parametrize(("method", "path"), WORK_READS)
+def test_a_work_read_with_a_non_json_body_raises_api_error(method: str, path: str):
+    # A gateway/proxy can answer a parked read with a non-JSON error page; we
+    # must surface a clean ApiError, not let json.JSONDecodeError escape.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>502 Bad Gateway</html>")
+
+    client = _client(handler)
+    try:
+        with pytest.raises(ApiError) as exc_info:
+            getattr(client, method)(wait=5)
+    finally:
+        client.close()
+
+    assert exc_info.value.status == 200
+    assert "non-JSON" in exc_info.value.detail
+
+
+def test_claim_mention_posts_to_the_notifications_claim_path():
+    """The claim is what acknowledges a mention, so it must reach the board."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"notification_id": "n-1", "task_id": "t1", "run_id": "r1"})
+
+    client = _client(handler)
+    try:
+        result = client.claim_mention("n-1")
+    finally:
+        client.close()
+
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/api/me/work/mentions/n-1/claim"
+    assert result["run_id"] == "r1"
+
+
+def test_claim_mention_can_answer_with_no_responding_run():
+    """The board sends no run when this agent already holds a working claim on
+    the task; the client passes that through rather than inventing one."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"notification_id": "n-1", "task_id": "t1", "run_id": None})
+
+    client = _client(handler)
+    try:
+        assert client.claim_mention("n-1")["run_id"] is None
     finally:
         client.close()
 
@@ -186,23 +254,6 @@ def test_4xx_raises_api_error_with_status():
 
     assert exc_info.value.status == 404
     assert exc_info.value.detail == "not found"
-
-
-def test_wait_for_work_non_json_body_raises_api_error():
-    # A gateway/proxy can answer the long poll with a non-JSON error page;
-    # we must surface a clean ApiError, not let json.JSONDecodeError escape.
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="<html>502 Bad Gateway</html>")
-
-    client = _client(handler)
-    try:
-        with pytest.raises(ApiError) as exc_info:
-            client.wait_for_work(timeout=5)
-    finally:
-        client.close()
-
-    assert exc_info.value.status == 200
-    assert "non-JSON" in exc_info.value.detail
 
 
 def test_4xx_non_json_body_raises_api_error_with_text():
@@ -425,66 +476,6 @@ def test_disconnect_sends_delete():
 
     assert seen["method"] == "DELETE"
     assert seen["path"] == "/api/boards/b-1/agent-connection"
-
-
-def test_wait_for_work_passes_board_id():
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.params.get("board_id") == "b-9"
-        return httpx.Response(200, json=[{"task_id": "t1", "board_id": "b-9"}])
-
-    client = _client(handler)
-    try:
-        assert client.wait_for_work(timeout=1, board_id="b-9")[0]["board_id"] == "b-9"
-    finally:
-        client.close()
-
-
-def test_wait_for_work_without_board_id_omits_param():
-    seen: dict[str, dict[str, str]] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["params"] = dict(request.url.params)
-        return httpx.Response(204)
-
-    client = _client(handler)
-    try:
-        client.wait_for_work(timeout=1)
-    finally:
-        client.close()
-
-    assert "board_id" not in seen["params"]
-
-
-def test_get_my_work_passes_board_id():
-    seen: dict[str, dict[str, str]] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["params"] = dict(request.url.params)
-        return httpx.Response(200, json=[])
-
-    client = _client(handler)
-    try:
-        client.get_my_work(board_id="b-5")
-    finally:
-        client.close()
-
-    assert seen["params"].get("board_id") == "b-5"
-
-
-def test_get_my_work_without_board_id_omits_param():
-    seen: dict[str, dict[str, str]] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["params"] = dict(request.url.params)
-        return httpx.Response(200, json=[])
-
-    client = _client(handler)
-    try:
-        client.get_my_work()
-    finally:
-        client.close()
-
-    assert "board_id" not in seen["params"]
 
 
 def test_register_install_posts_and_returns_id() -> None:

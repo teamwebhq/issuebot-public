@@ -137,20 +137,22 @@ a change from `issuebot connect` immediately. If the command cannot read a
 change, it reports the error and continues with the active connections.
 
 Run `issuebot doctor` to examine an installation. First, it makes sure that the
-PAT can get work. It stops if the PAT cannot get work. Then, it examines the
-harness executable. It also does the available plugin checks for each
-connection. All checks after the PAT check are warnings.
+PAT can read the list of outstanding tasks. It stops if the PAT cannot read the
+list. Then, it examines the harness executable. It also does the available
+plugin checks for each connection. All checks after the PAT check are warnings.
 
 ## How a task runs
 
-1. **Get work** — issuebot gets a work item from the source. The source sends
-   each work item one time, when the work starts. Also, issuebot examines the
-   list of work that stays assigned to the agent. It does this examination at
-   the start, then every 5 minutes, and again after a failed connection to the
-   source. Thus, work that the one-time delivery does not send is not lost.
-2. **Claim the task** — issuebot claims an assigned task. If a different listener
-   has the claim, issuebot continues to the next work item. A mention uses its
-   non-locking run from the source.
+1. **Get work** — issuebot reads the work that is outstanding for the agent:
+   the tasks, and the mentions. The tasks list shows the tasks that stay
+   assigned to the agent, and the board pool work for which the agent is
+   responsible. Each read changes nothing at the source, and each read gives
+   the same items again until a claim removes them. Thus, work that issuebot
+   cannot run now is not lost: it is in the next read.
+2. **Claim the work** — issuebot claims each work item. A claim acknowledges
+   the work and removes it from the next read. If a different listener has the
+   claim on a task, issuebot continues to the next work item. A mention claim
+   gives the non-locking run in which the agent writes its answer.
 3. **Set the outputs** — issuebot sets the output kinds that the run can
    report. The agent prompt shows only these output kinds. Refer to
    [What a run can report](#what-a-run-can-report).

@@ -22,15 +22,8 @@ from issuebot.runner import ProjectListener
 
 _PROJECT = connection()
 
-# A mention as the server delivers it. Fields the runner doesn't model (the
-# comment and notification ids) are dropped by WorkItem.from_api rather than
-# carried around untyped.
+# A mention as the board lists it, carrying the notification its claim names.
 _MENTION = mention(actor_name="Alice", comment_excerpt="Can you look into the login bug?")
-
-# Same mention but carrying the run_id the server opens for a responding run.
-_MENTION_WITH_RUN = mention(
-    actor_name="Alice", comment_excerpt="Can you look into the login bug?", run_id="r1"
-)
 
 
 class MentionApi:
@@ -38,14 +31,17 @@ class MentionApi:
 
     def __init__(self) -> None:
         self.claims: list[str] = []
+        self.mention_claims: list[str] = []
         self.releases: list[dict[str, Any]] = []
         self.comments: list[tuple[str, str]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.heartbeats: list[str] = []
 
-    def wait_for_work(
-        self, *, timeout: int = 25, board_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
+        """Return empty — mention tests drive _process directly."""
+        return []
+
+    def get_mentions(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
         """Return empty — mention tests drive _process directly."""
         return []
 
@@ -53,6 +49,11 @@ class MentionApi:
         """Record the claim attempt."""
         self.claims.append(task_id)
         return {"run_id": "r1", "task_id": task_id}
+
+    def claim_mention(self, notification_id: str) -> dict[str, Any]:
+        """Record the mention claim and open its responding run."""
+        self.mention_claims.append(notification_id)
+        return {"notification_id": notification_id, "task_id": "t1", "run_id": "r1"}
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         return {"id": task_id, "requester_id": "u-req"}
@@ -121,15 +122,16 @@ def test_an_item_with_no_kind_is_treated_as_assigned() -> None:
 
 
 def test_a_mention_run_is_released_from_its_outcome() -> None:
-    """A mention carries the board's own non-locking run: never claimed, and
-    released with whatever the run actually produced."""
+    """A mention is claimed by its notification, which opens the board's own
+    non-locking run — and that run is released with what the run produced."""
     ex = _StubEnvironment()
     api = MentionApi()
     listener = ProjectListener(wiring(_PROJECT, api=api, environment=ex))
 
-    listener._process(_MENTION_WITH_RUN)
+    listener._process(_MENTION)
 
-    assert api.claims == []
+    assert api.claims == []  # no run lock is taken for a mention
+    assert api.mention_claims == ["n1"]
     assert api.releases == [{"run_id": "r1", "status": "done", "note": None}]
 
 
@@ -153,12 +155,10 @@ class _SupervisorApi(MentionApi):
     def disconnect(self, board_id: str) -> None:
         pass
 
-    def wait_for_work(
-        self, *, timeout: int = 25, board_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list[dict[str, Any]]:
         import time as _time
 
-        _time.sleep(min(timeout, 0.02))
+        _time.sleep(min(wait, 0.02))
         return []
 
     def report_telemetry(self, **kwargs: Any) -> None:

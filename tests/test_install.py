@@ -73,7 +73,10 @@ class _RegisteringApi:
     def disconnect(self, board_id: str) -> None:
         pass
 
-    def wait_for_work(self, *, timeout: int = 25, board_id: str | None = None) -> list:
+    def get_tasks(self, *, board_id: str | None = None, wait: int = 0) -> list:
+        return []
+
+    def get_mentions(self, *, board_id: str | None = None, wait: int = 0) -> list:
         return []
 
     def wait_for_commands(self, *, install_id: str | None = None, timeout: int = 25) -> list:

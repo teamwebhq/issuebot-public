@@ -53,9 +53,9 @@ class WorkItem:
     # missing kind means an older server that only ever sent assigned tasks.
     kind: WorkKind = "assigned"
 
-    # The server's non-locking "responding" run for a mention, heartbeated and
-    # released while the session works. Older servers omit it.
-    run_id: str | None = None
+    # The board's queue entry for a mention, which is what its claim names.
+    # Only a mention carries one.
+    notification_id: str | None = None
 
     # Mention context: who mentioned the agent, and what they said.
     actor_name: str | None = None
@@ -71,14 +71,14 @@ class WorkItem:
 
     @classmethod
     def from_api(cls, payload: dict[str, Any]) -> WorkItem:
-        """Build from a ``/me/work`` payload, ignoring fields we don't model."""
+        """Build from a work-list payload, ignoring fields we don't model."""
         kind = payload.get("kind")
         return cls(
             task_id=str(payload["task_id"]),
             reference=payload.get("reference"),
             source_ref=None if payload.get("board_id") is None else str(payload["board_id"]),
             kind="mention" if kind == "mention" else "assigned",
-            run_id=payload.get("run_id"),
+            notification_id=payload.get("notification_id"),
             actor_name=payload.get("actor_name"),
             comment_excerpt=payload.get("comment_excerpt"),
             repo=payload.get("repo"),
@@ -366,4 +366,6 @@ class Claim:
     """
 
     work_id: str
-    token: str | None = None  # whatever the source needs to release it
+    # Whatever the source needs to release it. Empty when the claim holds
+    # nothing to release — a mention the board opened no responding run for.
+    token: str = ""

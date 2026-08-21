@@ -63,21 +63,10 @@ from issuebot.plugins.workspaces.base import Workspace
 from issuebot.reporter import ConsoleReporter
 from issuebot.sessions import SessionStore
 from issuebot.status import StatusStore, build_payload, default_status_path
-from issuebot.transient import (
-    describe_transient,
-    is_transient,
-    log_poll_failure,
-    log_poll_recovered,
-)
+from issuebot.transient import log_poll_failure, log_poll_recovered
 from issuebot.verify import verify
 
 logger = logging.getLogger("issuebot")
-
-# How often a listener sweeps its source's standing assignment list
-# (`Source.sweep`) alongside the one-shot delivery channel `poll` reads. Work
-# delivered while the poll loop was erroring is never delivered again, so the
-# listener goes and looks for whatever is still assigned to it.
-SWEEP_INTERVAL_SECONDS = 300.0
 
 
 class _ThreadFilter(logging.Filter):
@@ -438,7 +427,7 @@ def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
 
 
 class ProjectListener:
-    """Long-polls one board's work queue and runs whatever it delivers."""
+    """Polls one board for the work outstanding against this agent and runs it."""
 
     def __init__(
         self,
@@ -575,7 +564,12 @@ class ProjectListener:
     # -- the poll loop ------------------------------------------------------
 
     def run(self) -> None:
-        """Long-poll for work and run each item until stopped.
+        """Poll for outstanding work and run each item until stopped.
+
+        Every poll is a full reconciliation: the source answers with everything
+        still waiting, so an item this listener could not take — the claim was
+        lost, the pool was full, the board was unreachable — is simply on the
+        next answer. Nothing has to be remembered between rounds.
 
         With ``max_concurrent > 1`` the work is dispatched to a bounded thread
         pool so several runs proceed at once; claiming itself always stays on
@@ -587,15 +581,6 @@ class ProjectListener:
             self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=self._max_concurrent)
         transient_fails = 0
 
-        # True while the last poll attempt failed, so a recovery can sweep for
-        # whatever the source tried to deliver meanwhile. Separate from
-        # `transient_fails`, which a loud failure resets to zero.
-        poll_failed = False
-
-        # Due immediately, so a listener that has just started — or just been
-        # restarted — picks up whatever is already assigned to it.
-        last_sweep = time.monotonic() - SWEEP_INTERVAL_SECONDS
-
         while not self._stop.is_set():
             # Only report waiting when nothing is actually running: with a pool
             # the poll thread keeps looping while workers are mid-run, and must
@@ -603,61 +588,19 @@ class ProjectListener:
             if not self._has_active_runs():
                 self._state.set_phase("waiting")
 
-            if time.monotonic() - last_sweep >= SWEEP_INTERVAL_SECONDS:
-                last_sweep = time.monotonic()
-                self._sweep()
-
             try:
                 items = self._source.poll(timeout=self._wait_timeout)
             except Exception as exc:  # noqa: BLE001
                 transient_fails = log_poll_failure(logger, "Board API", exc, transient_fails)
-                poll_failed = True
                 self._stop.wait(3)
                 continue
 
             transient_fails = log_poll_recovered(logger, "Board API", transient_fails)
 
-            # Deliveries made while the source was unreachable are gone: the
-            # board sends each one once. Sweep as soon as polling works again
-            # rather than waiting out the interval.
-            if poll_failed:
-                poll_failed = False
-                last_sweep = time.monotonic()
-                self._sweep()
-
             for work in items:
                 if self._stop.is_set():
                     return
                 self._process(work)
-
-    def _sweep(self) -> None:
-        """Run whatever the source still says is assigned to this agent.
-
-        The delivery channel :meth:`Source.poll` reads is one-shot, so work it
-        missed — delivered while the poll loop was erroring, or never delivered
-        per item at all — is only found by going to look. Swept items take the
-        very same :meth:`_process` path as delivered ones, and claiming is the
-        dedup: a task already claimed or already running answers no claim, so
-        an item that is both delivered and swept still runs once.
-
-        A sweep that fails is logged and dropped. It must never end the poll
-        thread, and the next sweep is only an interval away.
-        """
-        try:
-            items = self._source.sweep()
-        except Exception as exc:  # noqa: BLE001 — a failed sweep must not kill the poll loop
-            if is_transient(exc):
-                logger.info("work sweep deferred (%s); will retry", describe_transient(exc))
-            else:
-                logger.warning("work sweep failed", exc_info=True)
-            return
-
-        # `_process` waits for a free slot, exactly as it does for delivered
-        # work, so a sweep never runs more than the connection allows.
-        for work in items:
-            if self._stop.is_set():
-                return
-            self._process(work)
 
     def _process(self, work: WorkItem) -> None:
         """Claim one work item and hand it to the run pipeline, if claiming
@@ -670,12 +613,9 @@ class ProjectListener:
 
         A free slot is taken *before* the claim, never after: claiming first
         and then waiting for capacity would hold a board lock on work nothing
-        is running yet. And it is *waited for*, not tested: the board does not
-        redeliver — a task assigned to this agent is simply assigned, and
-        coming to get it is issuebot's job — so an item skipped at the limit
-        would be lost until something else touched the task. Waiting here just
-        pauses this listener's polling, which is right anyway: there is no
-        point fetching work faster than it can be run.
+        is running yet. And it is *waited for*, not tested, because pausing
+        this listener's polling is the right answer anyway: there is no point
+        fetching work faster than it can be run.
         """
         while not self._slots.acquire(timeout=0.5):
             if self._stop.is_set():
@@ -824,7 +764,7 @@ class ProjectListener:
         reaches a worker only after ``stop()`` has run sees ``_stop`` set and
         bails without starting, releasing the run rather than stranding it.
         """
-        run_id = claim.token or ""
+        run_id = claim.token
         cancel = threading.Event()
         # Fall back to a key that is still unique per run so it never collides
         # in the shared registry (a mention with no responding run has none).

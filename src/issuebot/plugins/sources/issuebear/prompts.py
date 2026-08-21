@@ -62,18 +62,18 @@ def render_response_instructions(permits: frozenset[OutputKind]) -> str:
     return _RESPONSE_BLOCK.format(env=RESPONSE_ENV, kinds=kinds)
 
 
-# The identity block, woven into every work prompt: who the agent is, and who
-# asked for the work. An agent that knows neither has to guess a name when it
-# hands the task back or opens a follow-up, and a guessed name is not a user id.
+# The identity block, woven into every work prompt: who the agent is, and which
+# person the work belongs to (the requester, or their owner when an agent asked).
+# An agent that knows neither has to guess a name when it hands the task back,
+# and a guessed name is not a user id.
 _IDENTITY_SELF = "**You are {agent_name} on this board.** Your own board user id is `{agent_id}`."
 
 _IDENTITY_REQUESTER = """\
-**{requester_name} requested this task.** Their board user id is `{requester_id}`.
+**{requester_name} is the person behind this task.** Their board user id is `{requester_id}`.
 
 - Handing the task back to them means `assignee_id="{requester_id}"` — that id, never a name.
-- A follow-up task you create must carry `requester_id="{requester_id}"` as well. Leave \
-yourself as its requester and both its plan and its questions come back to you, so no \
-person ever sees them."""
+- A follow-up task you create is requested by you, which is right: the board records that \
+you raised it, and sends its questions and notifications to the person who owns you."""
 
 
 def render_identity(
