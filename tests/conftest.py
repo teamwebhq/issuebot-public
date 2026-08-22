@@ -906,13 +906,13 @@ class SpawnRecorder(RecordingProcess):
         self.mcp_json: dict | None = None
         self.cancel: threading.Event | None = None
 
-    def spawn(self, argv, *, on_line, cwd=None, env=None, cancel=None) -> int:
+    def spawn(self, argv, *, on_line, cwd=None, env=None, cancel=None, stdin=None) -> int:
         """Record the mcp-config contents (if any), then spawn as usual."""
         self.cancel = cancel
         if "--mcp-config" in argv:
             mcp_path = argv[argv.index("--mcp-config") + 1]
             self.mcp_json = json.loads(Path(mcp_path).read_text())
-        return super().spawn(argv, on_line=on_line, cwd=cwd, env=env, cancel=cancel)
+        return super().spawn(argv, on_line=on_line, cwd=cwd, env=env, cancel=cancel, stdin=stdin)
 
     @property
     def argv(self) -> list[str] | None:
@@ -923,6 +923,11 @@ class SpawnRecorder(RecordingProcess):
     def cwd(self) -> str | None:
         """The folder the last command ran in."""
         return self.cwds[-1] if self.cwds else None
+
+    @property
+    def stdin(self) -> str | None:
+        """What the last command was fed on standard input."""
+        return self.stdins[-1] if self.stdins else None
 
     @property
     def env(self) -> dict | None:

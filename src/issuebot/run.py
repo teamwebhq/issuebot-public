@@ -31,7 +31,7 @@ import shutil
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -42,7 +42,7 @@ from issuebot.config import conn_setting
 from issuebot.contracts import Delivery, Response, SinkResult, parse_outputs
 from issuebot.plugins.harnesses.base import Harness, LaunchResult, LaunchSpec
 from issuebot.plugins.workspaces.base import Prepared, Workspace
-from issuebot.process import REAL, Process
+from issuebot.process import REAL, Process, with_env
 from issuebot.reporter import ConsoleReporter, Reporter
 from issuebot.transient import describe_transient, is_transient
 
@@ -324,6 +324,7 @@ def deliver_all(
     connection: Connection,
     *,
     sinks: Sequence[tuple[SinkRef, Sink]],
+    forge_env: Mapping[str, str] | None = None,
 ) -> list[SinkResult]:
     """Hand every deliverable output to every sink that accepts its kind, over
     every sink the connection declares, in order.
@@ -368,6 +369,7 @@ def deliver_all(
                 changes=response.changes,
                 repo=repo,
                 folder=folder,
+                forge_env=forge_env or {},
             )
             try:
                 results.append(sink.deliver(delivery))
@@ -433,6 +435,14 @@ def execute(
     state = wiring.ctx.state or AgentState()
     rep = reporter or ConsoleReporter(ref=job.work.ref, show_prefix=False, agent_state=state)
 
+    # Everything this run shells out to — the clone, the branch, the push —
+    # authenticates as whatever the source lent (`Job.forge_env`), not as the
+    # machine's own credential. Applied once here rather than at each git call
+    # site: one missed call site would silently fall back to the credential
+    # this exists to stop using. `with_env` returns `proc` untouched when
+    # nothing was lent.
+    proc = with_env(proc, job.forge_env)
+
     ready = _prepare(job, workspace, connection, settings, proc, rep)
     if isinstance(ready, Response):
         return ready
@@ -460,7 +470,7 @@ def execute(
             prompt=prompt,
             folder=prepared.folder,
             resume_session_id=job.resume_session_id,
-            env={**job.env, **prov.env, RESPONSE_ENV: response_path},
+            env={**job.env, **job.forge_env, **prov.env, RESPONSE_ENV: response_path},
             mcp_servers=prov.mcp_servers + [s.to_fragment() for s in job.mcp_servers],
             plugin_dirs=prov.plugin_dirs,
             disallowed_tools=list(job.withheld_tools),

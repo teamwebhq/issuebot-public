@@ -273,6 +273,18 @@ class Job:
     # mention an older server opened no responding run for).
     run_id: str = ""
 
+    # What this run's forge tools authenticate and identify themselves as:
+    # environment variables applied to the agent's own launch AND to every git
+    # and `gh` command the run makes, so a push, a pull request and a comment
+    # all come from the same identity. Lent by the source (a board that holds
+    # app credentials of its own); empty when it has none to lend, which leaves
+    # the run using whatever credential the machine already holds.
+    #
+    # Environment variables rather than a typed credential because the shape is
+    # a forge's own, not the runner's: the source names what its forge's tools
+    # read, and core carries it without knowing which forge that is.
+    forge_env: Mapping[str, str] = field(default_factory=dict)
+
 
 class _Document(BaseModel):
     """The agent's response file, as written."""
@@ -344,6 +356,13 @@ class Delivery:
     # The connection's own local working copy, when it has one. Empty for a
     # clone-based or sandboxed connection — see the class docstring.
     folder: str = ""
+
+    # The run's forge credentials/identity, as environment variables (see
+    # `Job.forge_env`). A sink runs controller-side and shells out to its own
+    # forge's tools, so it needs the same identity the run itself used —
+    # otherwise the branch is pushed by one actor and the pull request opened
+    # by another. Empty when the source lent none.
+    forge_env: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

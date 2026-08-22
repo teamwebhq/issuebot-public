@@ -128,6 +128,7 @@ class _Client(Protocol):
     def heartbeat(self, run_id: str) -> None: ...
     def list_board_members(self, board_id: str) -> list[dict[str, Any]]: ...
     def get_task(self, task_id: str) -> dict[str, Any]: ...
+    def git_credentials(self, task_id: str) -> dict[str, Any] | None: ...
 
 
 class Issuebear(Source):
@@ -557,3 +558,48 @@ class Issuebear(Source):
         Overrides the ABC's no-op: this board leases the run lock, so a run
         that stops heartbeating is a run the board hands to someone else."""
         self._client.heartbeat(run_id)
+
+    # -- the ForgeAuth capability --------------------------------------------
+
+    def forge_env(self, work: WorkItem) -> dict[str, str]:
+        """What this run's git and ``gh`` calls authenticate and identify as.
+
+        The board lends its GitHub App's own short-lived, repo-scoped token, so
+        the branch, the pull request and any comment on it come from the app
+        rather than from whichever person's token this machine holds. The
+        clanker rides along as the commit author: the app is the actor, the
+        clanker is the author, which is as close to "the agent did this" as
+        GitHub lets an app get — it has no per-token display name.
+
+        The credential helper is set here as well as at clone time. A workspace
+        issuebot cloned already asks ``gh`` for its password, but a worktree cut
+        from the developer's own repository never did, and would authenticate a
+        push from the machine's keychain — the very credential this replaces.
+        Git reads ``GIT_CONFIG_*`` last of all, so this wins over whatever that
+        checkout is configured with, for this run only.
+
+        Never raises: a board that has nothing to lend, is too old to know the
+        endpoint, or cannot be reached leaves the run using the machine's own
+        credential, exactly as before this existed.
+        """
+        try:
+            lent = self._client.git_credentials(work.task_id)
+        except Exception as exc:  # noqa: BLE001 - no run fails over a credential we could not borrow
+            logger.warning("could not borrow git credentials for %s: %s", work.ref, exc)
+            return {}
+
+        if not lent or not lent.get("token"):
+            return {}
+
+        author = lent.get("author_name") or "Agent"
+        email = lent.get("author_email") or "agent@agents.invalid"
+        return {
+            "GH_TOKEN": lent["token"],
+            "GIT_AUTHOR_NAME": author,
+            "GIT_AUTHOR_EMAIL": email,
+            "GIT_COMMITTER_NAME": author,
+            "GIT_COMMITTER_EMAIL": email,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "credential.https://github.com.helper",
+            "GIT_CONFIG_VALUE_0": "!gh auth git-credential",
+        }

@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from issuebot.contracts import Changed, SinkResult
 from issuebot.plugins.sinks.base import Sink
-from issuebot.process import REAL, Process
+from issuebot.process import REAL, Process, with_env
 
 if TYPE_CHECKING:
     from issuebot.contracts import Changes, Delivery, OutputKind
@@ -176,7 +176,19 @@ def _diff(proc: Process, repo: str, changes: Changes, folder: str) -> str:
     return result.out if result.ok else ""
 
 
-def _open_pr(proc: Process, repo: str, branch: str, title: str, body: str) -> str | None:
+def _signed(body: str, delivery: Delivery) -> str:
+    """The PR body, with the clanker that did the work named at the foot of it.
+
+    The pull request's *actor* is the app whose token opened it — GitHub has no
+    per-token display name, so an app cannot post as a named agent. The commits
+    carry the clanker as their author, and this puts the same name where a
+    reviewer reading the description will see it.
+    """
+    author = delivery.forge_env.get("GIT_AUTHOR_NAME", "")
+    return f"{body}\n\n---\n\nOpened by **{author}**." if author else body
+
+
+def _open_pr(proc: Process, repo: str, branch: str, body: str, *, title: str) -> str | None:
     """The branch's open PR url, opening one if there isn't already one.
 
     Scoped with ``pr list --state open`` rather than ``pr view <branch>``: the
@@ -323,7 +335,11 @@ class GitHubSink(Sink):
         :class:`~issuebot.contracts.SinkResult` rather than opening a PR from
         nothing."""
         assert isinstance(delivery.output, Changed)
-        proc = self._proc
+        # Every `gh` call below authenticates as whatever the source lent for
+        # this run (`Delivery.forge_env`) — the same identity that pushed the
+        # branch, so it is not pushed by one actor and opened by another.
+        # Untouched when nothing was lent: the machine's own `gh` credential.
+        proc = with_env(self._proc, delivery.forge_env)
         changes = delivery.changes
 
         if changes is None or changes.empty:
@@ -361,7 +377,7 @@ class GitHubSink(Sink):
             model=self._summary_model,
             ref=delivery.work.ref,
         )
-        url = _open_pr(proc, repo, changes.branch, title, body)
+        url = _open_pr(proc, repo, changes.branch, _signed(body, delivery), title=title)
         if url is None:
             return SinkResult(sink=self.name, ok=False, summary="could not open a pull request")
 

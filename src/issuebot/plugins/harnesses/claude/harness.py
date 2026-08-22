@@ -170,12 +170,17 @@ class ClaudeHarness(Harness):
     def summarize(self, diff: str, *, context: str, model: str | None, folder: str) -> str:
         """Generate PR text from a diff via a tools-free, MCP-free `claude -p`.
         Runs in ``folder`` and returns the collected stdout."""
+        prompt = _SUMMARY_PROMPT.format(
+            guidance=body("writing-pull-requests"), context=context, diff=diff
+        )
         argv = [
             self._command,
+            # No prompt argument: `claude -p` reads it from stdin instead. A
+            # diff-carrying prompt runs to hundreds of kilobytes, and a single
+            # argv entry cannot exceed 128KB on Linux — one in argv failed the
+            # exec with "Argument list too long" and cost every large change its
+            # written PR description.
             "-p",
-            _SUMMARY_PROMPT.format(
-                guidance=body("writing-pull-requests"), context=context, diff=diff
-            ),
             # MCP-free for real: with no --mcp-config to name any, this says
             # "only the ones named there", i.e. none. Without it the user's own
             # globally configured servers load — every one of them started and
@@ -188,7 +193,7 @@ class ClaudeHarness(Harness):
         if model:
             argv += ["--model", model]
         out: list[str] = []
-        code = self._proc.spawn(argv, on_line=out.append, cwd=folder)
+        code = self._proc.spawn(argv, on_line=out.append, cwd=folder, stdin=prompt)
         text = "\n".join(out).strip()
 
         # An empty answer here is the caller's cue to fall back to a mechanical

@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -80,10 +81,17 @@ class Process(Protocol):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         cancel: threading.Event | None = None,
+        stdin: str | None = None,
     ) -> int:
         """Run while streaming stdout line by line to ``on_line``, and return the
         exit code. If ``cancel`` is set mid-run the child is terminated, then
-        killed if it does not go quietly."""
+        killed if it does not go quietly.
+
+        ``stdin``, when given, is fed to the child on its standard input. That
+        is the only way to hand a program text of unbounded size: the kernel
+        caps a *single* argv entry at 128KB (``MAX_ARG_STRLEN``) regardless of
+        how much room the rest of the command line has, so a big prompt in argv
+        fails the exec outright with ``Argument list too long``."""
         ...
 
 
@@ -142,12 +150,27 @@ class RealProcess:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         cancel: threading.Event | None = None,
+        stdin: str | None = None,
     ) -> int:
-        """Stream the child's output, honouring ``cancel``."""
+        """Stream the child's output, honouring ``cancel``, after feeding it
+        ``stdin``."""
+        # A temp file rather than a pipe: the read loop below only starts once
+        # the child is running, so anything larger than the pipe buffer (64KB)
+        # would deadlock — parent blocked writing, child blocked writing back.
+        # A file is written in full before the child starts and needs no writer
+        # thread. The parent's copy is closed once Popen has duplicated it into
+        # the child.
+        feed = None
+        if stdin is not None:
+            feed = tempfile.TemporaryFile()
+            feed.write(stdin.encode())
+            feed.seek(0)
+
         try:
             proc = subprocess.Popen(  # noqa: S603 - argv is built by callers, never shell
                 argv,
                 cwd=cwd,
+                stdin=feed,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -157,6 +180,9 @@ class RealProcess:
         except (FileNotFoundError, NotADirectoryError, PermissionError) as exc:
             on_line(f"could not start {argv[0]}: {exc}")
             return NOT_RUN
+        finally:
+            if feed is not None:
+                feed.close()
 
         watcher = None
         if cancel is not None:
@@ -217,6 +243,7 @@ class RecordingProcess:
     calls: list[list[str]] = field(default_factory=list)
     cwds: list[str | None] = field(default_factory=list)
     envs: list[dict[str, str] | None] = field(default_factory=list)
+    stdins: list[str | None] = field(default_factory=list)
 
     def run(
         self,
@@ -244,17 +271,72 @@ class RecordingProcess:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         cancel: threading.Event | None = None,
+        stdin: str | None = None,
     ) -> int:
         """Record the call, replay ``lines``, and stop early if cancelled."""
         self.calls.append(list(argv))
         self.cwds.append(cwd)
         self.envs.append(env)
+        self.stdins.append(stdin)
 
         for line in self.lines:
             if cancel is not None and cancel.is_set():
                 break
             on_line(line)
         return self.exit_code
+
+
+@dataclass(frozen=True)
+class _WithEnv:
+    """One adapter wrapped so every command it runs carries an overlay.
+
+    A decorator rather than an ``env=`` argument threaded through the dozens of
+    git and ``gh`` call sites: what a run authenticates as is a property of the
+    run, not of each command, and every call site that forgot to pass it would
+    silently fall back to the machine's own credential — the exact failure the
+    overlay exists to prevent.
+    """
+
+    inner: Process
+    overlay: dict[str, str]
+
+    def _env(self, env: dict[str, str] | None) -> dict[str, str]:
+        """The overlay, with a caller's own variables winning over it."""
+        return {**self.overlay, **(env or {})}
+
+    def run(
+        self,
+        argv: list[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Completed:
+        """Run to completion with the overlay applied."""
+        return self.inner.run(argv, cwd=cwd, env=self._env(env))
+
+    def spawn(
+        self,
+        argv: list[str],
+        *,
+        on_line: Callable[[str], None],
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        cancel: threading.Event | None = None,
+        stdin: str | None = None,
+    ) -> int:
+        """Stream the child's output with the overlay applied."""
+        return self.inner.spawn(
+            argv, on_line=on_line, cwd=cwd, env=self._env(env), cancel=cancel, stdin=stdin
+        )
+
+
+def with_env(proc: Process, overlay: Mapping[str, str]) -> Process:
+    """``proc``, with ``overlay`` applied to every command it runs.
+
+    ``proc`` itself when the overlay is empty, so the common case adds no
+    layer and a test asserting on its own adapter still sees it.
+    """
+    return _WithEnv(proc, dict(overlay)) if overlay else proc
 
 
 # The adapter every caller defaults to. Stateless, so one instance is enough.

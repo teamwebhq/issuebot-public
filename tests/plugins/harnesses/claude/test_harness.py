@@ -349,6 +349,18 @@ def test_summarize_prompt_carries_the_pr_writing_guidance():
     harness = ClaudeHarness(command="claude", proc=spawn)
     harness.summarize("DIFF", context="ISS-1", model=None, folder="/repo")
 
-    prompt = spawn.argv[spawn.argv.index("-p") + 1]
+    prompt = spawn.stdin or ""
     assert "DIFF" in prompt
     assert "reviewer" in prompt.lower()
+
+
+def test_summarize_sends_the_prompt_on_stdin_not_the_command_line():
+    """A diff-carrying prompt is far larger than a single argv entry may be, so
+    it travels on stdin; putting it in argv fails the exec entirely."""
+    spawn = SpawnRecorder(lines=["Add widget", "body"])
+    harness = ClaudeHarness(command="claude", proc=spawn)
+    big = "+" * 200_000
+    harness.summarize(big, context="ISS-1", model=None, folder="/repo")
+
+    assert big in (spawn.stdin or "")
+    assert all(big not in arg for arg in spawn.argv)

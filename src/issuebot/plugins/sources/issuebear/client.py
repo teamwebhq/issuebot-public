@@ -279,6 +279,24 @@ class IssuebotClient:
         """Record that this run's sandbox has been torn down."""
         self.patch_execution(run_id, sandbox_status="destroyed", sandbox_destroyed_at=_now_iso())
 
+    def git_credentials(self, task_id: str) -> dict[str, Any] | None:
+        """The board's own GitHub credentials for this task, or None.
+
+        A short-lived token minted from the board's GitHub App, scoped to the
+        one repository the task's project is linked to, so a push, a pull
+        request and a comment are attributed to that app rather than to
+        whichever person's personal token this machine holds.
+
+        A 404 is the board saying it has none to lend — the project is not
+        linked, the app is not installed here, this deployment has no app
+        configured — and is not an error: the caller keeps using whatever
+        credential the machine already has.
+        """
+        resp = self._http.post(f"/me/work/tasks/{task_id}/git-credentials")
+        if resp.status_code == 404:
+            return None
+        return self._json(resp)
+
     def heartbeat(self, run_id: str) -> None:
         """Send a liveness heartbeat for the given agent run."""
         self._json(self._http.post(f"/agent-runs/{run_id}/heartbeat"))

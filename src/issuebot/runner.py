@@ -58,7 +58,7 @@ from issuebot.plugins.base import EnvironmentPlugin, SinkPlugin, WorkspacePlugin
 from issuebot.plugins.environments.base import ExecutionEnvironment
 from issuebot.plugins.harnesses.base import Harness
 from issuebot.plugins.sinks.base import Sink
-from issuebot.plugins.sources.base import ConnectionConflict, Source, SourceClient
+from issuebot.plugins.sources.base import ConnectionConflict, ForgeAuth, Source, SourceClient
 from issuebot.plugins.workspaces.base import Workspace
 from issuebot.reporter import ConsoleReporter
 from issuebot.sessions import SessionStore
@@ -423,7 +423,27 @@ def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
         env={},
         resume_session_id=ctx.store.get(work.task_id) if ctx.store else None,
         run_id=run_id,
+        forge_env=forge_env(source, work),
     )
+
+
+def forge_env(source: Source, work: WorkItem) -> Mapping[str, str]:
+    """What this item's git/`gh` calls should authenticate and identify as.
+
+    A capability, not part of the axis: a source that holds credentials of its
+    own (a board with a GitHub App installed) lends a short-lived one for this
+    item, so the work is attributed to that app rather than to whichever
+    person's personal token is on the machine. One that does not — or that has
+    nothing to lend for this item — leaves the run using the machine's own
+    credential.
+
+    Asked once per run, here, so the controller and a sandbox worker (which
+    rebuilds the job through this same function) each borrow their own. ponytail:
+    a lent token typically lives an hour, so a run longer than that would push
+    with an expired one and report a failed delivery. Re-borrow per step if
+    that ever shows up.
+    """
+    return source.forge_env(work) if isinstance(source, ForgeAuth) else {}
 
 
 class ProjectListener:
@@ -725,7 +745,9 @@ class ProjectListener:
             return replace(response, status="failed", result_text="; ".join(problems))
 
         try:
-            results = run_pipeline.deliver_all(work, response, self._project, sinks=self._sinks)
+            results = run_pipeline.deliver_all(
+                work, response, self._project, sinks=self._sinks, forge_env=job.forge_env
+            )
             if run_pipeline.required_failed(results, self._sinks):
                 response = replace(
                     response, status="failed", result_text="a required sink failed to deliver"

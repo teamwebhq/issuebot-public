@@ -12,6 +12,7 @@ finish.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -170,6 +171,31 @@ class SandboxLifecycle(Protocol):
 
     def sandbox_destroyed(self, run_id: str) -> None:
         """Record that this run's sandbox has been torn down."""
+        ...
+
+
+@runtime_checkable
+class ForgeAuth(Protocol):
+    """A source that can lend a run the credentials its forge expects — an
+    optional capability, not part of :class:`Source`.
+
+    A board that holds app credentials of its own (an installed GitHub App, say)
+    can lend a short-lived, task-scoped credential so the work is attributed to
+    the app rather than to whichever human's personal token happens to sit on
+    the machine. Guarded by ``isinstance`` at the call site, like
+    :class:`SandboxLifecycle`, so a source without it is silently skipped.
+
+    Environment variables rather than a typed credential: what a forge's tools
+    read is the forge's own vocabulary, and the runner carries the answer
+    without knowing which forge it is for. Returning ``{}`` is the normal
+    "nothing to lend" answer — an unlinked project, no app installed, a board
+    that could not be reached — and leaves the run using whatever credential
+    the machine already holds. This must never raise: no run fails because a
+    credential could not be borrowed.
+    """
+
+    def forge_env(self, work: WorkItem) -> Mapping[str, str]:
+        """Environment for this item's forge tools, or ``{}`` when there is none."""
         ...
 
 
