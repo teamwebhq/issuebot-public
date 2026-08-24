@@ -9,7 +9,7 @@ import logging
 import uuid
 from typing import Any, ClassVar, Protocol
 
-from issuebot import plugins
+from issuebot import board_skills, plugins
 from issuebot.config import (
     Config,
     Connection,
@@ -129,6 +129,7 @@ class _Client(Protocol):
     def list_board_members(self, board_id: str) -> list[dict[str, Any]]: ...
     def get_task(self, task_id: str) -> dict[str, Any]: ...
     def git_credentials(self, task_id: str) -> dict[str, Any] | None: ...
+    def download_skill(self, skill_id: str) -> bytes: ...
 
 
 class Issuebear(Source):
@@ -512,9 +513,27 @@ class Issuebear(Source):
 
         A workspace ``problem`` (a diverged branch) prepends the reconcile
         preamble: the agent settles the divergence in-workspace before the
-        task, and the runner's final push stays plain (never forced)."""
+        task, and the runner's final push stays plain (never forced).
+
+        The instruction document itself comes from ``work.instructions`` —
+        the board's, never this runner's own — keyed the same way the
+        connection already chooses build vs. respond: a mention always reads
+        ``respond_mention``, everything else reads ``respond_task`` or
+        ``work_task`` off the connection's ``mode``. An item carrying no
+        document for the key this run needs fails the render
+        (:class:`~issuebot.plugins.sources.issuebear.prompts.MissingDocument`)
+        rather than launching an agent with no instructions."""
+        if work.kind == "mention":
+            key = "respond_mention"
+        elif conn_setting(connection, "mode", "build") == "respond":
+            key = "respond_task"
+        else:
+            key = "work_task"
+        document = work.instructions.get(key, "")
+
         if work.kind == "mention":
             rendered = prompts.render_mention_prompt(
+                document=document,
                 reference=work.ref,
                 actor_name=work.actor_name or "someone",
                 comment_excerpt=work.comment_excerpt or "",
@@ -529,15 +548,17 @@ class Issuebear(Source):
             requester_id, requester_name = self._human_for(work, members)
 
             rendered = prompts.render_work_prompt(
+                document=document,
                 reference=work.ref,
                 done=conn_setting(connection, "done", "review"),
                 confirm=conn_setting(connection, "confirm", True),
-                mode=conn_setting(connection, "mode", "build"),
                 permits=permits,
                 agent_name=_display_name(self._agent_id, members) if self._agent_id else "",
                 agent_id=self._agent_id or "",
                 requester_name=requester_name,
                 requester_id=requester_id,
+                skills=work.skills,
+                agent_instructions=work.agent_instructions,
             )
 
         if problem is not None:
@@ -558,6 +579,14 @@ class Issuebear(Source):
         Overrides the ABC's no-op: this board leases the run lock, so a run
         that stops heartbeating is a run the board hands to someone else."""
         self._client.heartbeat(run_id)
+
+    def agent_skills(self, work: WorkItem) -> board_skills.Bundle:
+        """Materialise the skills the board sent with this item.
+
+        Cached by the set's content, so the first task on a board downloads and
+        every one after it does not.
+        """
+        return board_skills.build(work.skills, self._client.download_skill)
 
     # -- the ForgeAuth capability --------------------------------------------
 

@@ -519,3 +519,41 @@ def test_register_install_sends_its_own_configured_name() -> None:
 
     assert result == "srv-2"
     assert seen["body"] == {"hostname": "myhost", "name": "my-agent"}
+
+
+def test_download_skill_returns_the_raw_zip_bytes() -> None:
+    """The body is a zip, not JSON, so it must come back untouched for
+    `board_skills` to unpack — routing it through `_json` would break it."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, content=b"PK\x03\x04fake-zip-bytes")
+
+    client = _client(handler)
+    try:
+        result = client.download_skill("skill-1")
+    finally:
+        client.close()
+
+    assert result == b"PK\x03\x04fake-zip-bytes"
+    assert seen["method"] == "GET"
+    assert seen["path"] == "/api/skills/skill-1/download"
+
+
+def test_download_skill_raises_api_error_on_a_4xx() -> None:
+    """A skill that no longer exists (or isn't this agent's to fetch) must
+    fail the run, not silently hand back an empty/garbage archive."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    client = _client(handler)
+    try:
+        with pytest.raises(ApiError) as exc_info:
+            client.download_skill("missing")
+    finally:
+        client.close()
+
+    assert exc_info.value.status == 404

@@ -385,6 +385,29 @@ def check_repo(connection: Connection, work: WorkItem) -> None:
         )
 
 
+def harness_name_for(work: WorkItem, wiring: Wiring) -> str:
+    """Which harness this run actually launches with.
+
+    ``work.harness`` is a request, not an order (see `WorkItem.harness`): this
+    install runs exactly one harness (`wiring.harness`), fixed for the whole
+    connection, and there is no mechanism here to swap it per item. When the
+    board asked for a different one, that request cannot be honoured — logged
+    once, naming both, so the mismatch is diagnosable from the log rather than
+    silently dropped, and the run proceeds on the install's own default rather
+    than failing over a preference set on a machine the board cannot see.
+    """
+    configured = wiring.harness.name
+    if work.harness is not None and work.harness != configured:
+        logger.warning(
+            "%s requested harness '%s', but this install runs '%s'; using '%s'",
+            work.ref,
+            work.harness,
+            configured,
+            configured,
+        )
+    return configured
+
+
 def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
     """Everything an environment needs to run one work item, decided here.
 
@@ -410,6 +433,12 @@ def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
     source = wiring.source
 
     check_repo(wiring.connection, work)
+
+    # Called for its side effect only: a mismatch between what the item asked
+    # for and what this install runs gets logged once, here. The `Job` itself
+    # carries no harness name — `run.execute` always launches with
+    # `wiring.harness`, so a field mirroring that would be set and never read.
+    harness_name_for(work, wiring)
 
     permits = source.permits(work) & wiring.workspace.produces_for(wiring.workspace_settings)
     return Job(

@@ -127,13 +127,6 @@ def test_readme_installs_the_latest_immutable_release() -> None:
     assert "version --commit" not in readme
 
 
-def test_release_vocabulary_scan_includes_shipped_markdown_assets() -> None:
-    """A shipped prompt must remain inside the release-vocabulary boundary."""
-    prompt = ROOT / "src" / "issuebot" / "plugins" / "sources" / "issuebear" / "templates"
-
-    assert prompt / "work_a_task.md" in _shipped_source_files()
-
-
 def test_released_code_uses_version_identity_only() -> None:
     """Shipped surfaces must retain release-version identity exclusively."""
     paths = [
@@ -394,6 +387,7 @@ BARE_FLAG = re.compile(r"^-{1,2}[a-z][a-z-]*$")
 NOT_OURS = frozenset(
     {
         "--dangerously-skip-permissions",
+        "--model",
         "--plugin-dir",
         "--strict-mcp-config",
     }

@@ -31,7 +31,7 @@ from conftest import (
 )
 from issuebot import release, sandbox_protocol
 from issuebot.config import source_plugin
-from issuebot.contracts import Changed, Job, NeedsInput, Response, WorkItem
+from issuebot.contracts import Changed, Job, NeedsInput, Response, SkillRef, WorkItem
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.runner import Wiring
 from issuebot.sandbox import SandboxEnvironment
@@ -260,6 +260,18 @@ def test_an_unknown_status_from_the_worker_is_not_trusted():
     outcome = _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
     assert outcome.status == "failed"
+
+
+def test_the_boards_pr_guidance_rides_back_from_the_sandbox():
+    """`Response.guidance` is resolved once inside the sandbox, where the
+    skill bundle is warm (`run.execute`), and must survive the trip back to
+    the controller over `RunResult` -- the controller's own delivery step has
+    no warm cache of its own to fall back on."""
+    provider = FakeProvider(result={"status": "done", "guidance": "Title in the imperative."})
+
+    outcome = _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    assert outcome.guidance == "Title in the imperative."
 
 
 # --- the reporter lifecycle ------------------------------------------------
@@ -529,6 +541,28 @@ def test_absent_mention_context_is_omitted_rather_than_blanked():
     assert "ISSUEBOT_ACTOR_NAME" not in provider.created["env"]
     assert "ISSUEBOT_AGENT_ID" not in provider.created["env"]
     assert _sent(provider).actor_name is None
+
+
+def test_skills_instructions_and_the_boards_run_preferences_ride_the_wire():
+    """None of these are on the task record the sandbox re-fetches, so — like the
+    mention context above — they only reach the worker if the controller puts
+    them on the wire itself."""
+    provider = FakeProvider()
+    item = work(
+        skills=(SkillRef(id="s1", slug="board-planning", updated_at="2026-08-23T10:00:00Z"),),
+        instructions={"work_task": "Do {reference}."},
+        harness="codex",
+        model="gpt-5",
+        agent_instructions="Run the checks.",
+    )
+    _executor(provider).run(_job(item), reporter=RecordingReporter())
+
+    sent = _sent(provider)
+    assert [s.slug for s in sent.skills] == ["board-planning"]
+    assert sent.instructions["work_task"] == "Do {reference}."
+    assert sent.harness == "codex"
+    assert sent.model == "gpt-5"
+    assert sent.agent_instructions == "Run the checks."
 
 
 def test_the_worker_is_told_which_kind_of_work_it_has():

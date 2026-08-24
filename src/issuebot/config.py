@@ -303,7 +303,30 @@ def harness_name(cfg: Config) -> str:
     wizard writes names one; the fallback is for a hand-written config on an
     install that has only one harness to mean. The message below names the key
     to write, not only the plugins to choose from.
+
+    `"codex"` is refused here by name, ahead of the generic lookup below, even
+    though the plugin's implementation is still in the tree
+    (`plugins.harnesses.codex`) and could resolve just fine. Skills for a run
+    come from the board via Claude Code's `--plugin-dir`, which Codex has no
+    equivalent for — a Codex run would silently get none of them, which is the
+    exact gap this refusal exists to close. Unregistering the plugin outright
+    would make this the generic "unknown harness" sentence, which is accurate
+    but says nothing about *why*, and would still have listed `codex` among
+    the "known:" harnesses everywhere else this module reports one (the
+    single-/several-harnesses fallback below, a typo of an unrelated plugin) —
+    offering it as though picking it were still a live option. Naming it here
+    instead keeps it out of every "known:" list while still explaining itself,
+    once, to the one install that can actually hit it: a saved
+    `harness = "codex"` from before this build.
     """
+    if cfg.harness == "codex":
+        raise plugins.UnknownPlugin(
+            'harness = "codex" is not supported: agent skills now come from the board and '
+            "are loaded via Claude Code's --plugin-dir, which Codex has no equivalent for, so "
+            "a Codex run would get no skills at all. Change harness in your config to "
+            '"claude" (or another installed harness) to continue.'
+        )
+
     if cfg.harness is not None:
         return cfg.harness
 

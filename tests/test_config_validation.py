@@ -127,6 +127,21 @@ def test_loading_a_bad_config_raises_with_all_of_them(tmp_path):
     assert "fodler" in str(exc.value) and "aws" in str(exc.value)
 
 
+def test_a_saved_config_naming_codex_refuses_to_load(tmp_path):
+    """The install this whole check exists for: `harness = "codex"` written by
+    a build that still offered it. It must not start — silently running Codex
+    with no skills is the bug being closed, and silently switching harness is
+    a different agent at a different cost with no consent — so the config
+    fails to load, same as any other config an installed plugin can't honour."""
+    from issuebot.config import save_config
+
+    path = tmp_path / "config.toml"
+    save_config(config(harness="codex"), path)
+
+    with pytest.raises(ConfigError, match="skills"):
+        load_config(path)
+
+
 # --- the mechanism itself, and the edges the brief flags -----------------------
 
 

@@ -63,6 +63,17 @@ logger = logging.getLogger("issuebot")
 # outside any workspace so the document can never appear in a commit.
 RESPONSE_ENV = "ISSUEBOT_RESPONSE"
 
+# The board's skill that carries PR-writing guidance, when it sends one. Named
+# once here rather than at each of `execute`'s and the GitHub sink's call
+# sites -- both need the same slug, and only one of them ever changes it.
+#
+# This is a contract with the board's seeded skill set, not a lookup issuebot
+# validates: a Parade org that renames or deletes the `writing-pull-requests`
+# skill does not break anything here, it just means `bundle.body()` finds no
+# match and `guidance` renders empty -- the PR description silently loses that
+# input with no error to trace it back to.
+PR_GUIDANCE_SLUG = "writing-pull-requests"
+
 
 def _overload_backoff(attempt: int) -> float:
     """Seconds to wait before the Nth overload retry: exponential from one
@@ -259,6 +270,8 @@ def _finish(
     proc: Process,
     result: LaunchResult,
     response_path: str,
+    *,
+    guidance: str = "",
 ) -> Response:
     """Finish a run that exited cleanly.
 
@@ -278,6 +291,10 @@ def _finish(
     ``proc`` erroring, git itself misbehaving — reaches this ``except`` and
     fails the run, because a ``done`` status with no ``Changes`` at all would
     be a worse answer than a plain failure.
+
+    ``guidance`` only ever reaches a caller past this point: it rides
+    unconditionally on a ``done`` response (see ``Response.guidance``), a
+    failure never delivers so never needs it.
     """
     try:
         raw = Path(response_path).read_text()
@@ -300,7 +317,9 @@ def _finish(
         )
 
     if "changes" not in job.permits:
-        return Response(status="done", outputs=outputs, session_id=result.session_id)
+        return Response(
+            status="done", outputs=outputs, session_id=result.session_id, guidance=guidance
+        )
 
     try:
         changes = workspace.commit_and_push(prepared, job.work.ref, settings=settings, proc=proc)
@@ -310,7 +329,13 @@ def _finish(
             status="failed", result_text="commit/push failed", session_id=result.session_id
         )
 
-    return Response(status="done", changes=changes, outputs=outputs, session_id=result.session_id)
+    return Response(
+        status="done",
+        changes=changes,
+        outputs=outputs,
+        session_id=result.session_id,
+        guidance=guidance,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +395,7 @@ def deliver_all(
                 repo=repo,
                 folder=folder,
                 forge_env=forge_env or {},
+                guidance=response.guidance,
             )
             try:
                 results.append(sink.deliver(delivery))
@@ -465,6 +491,17 @@ def execute(
     response_dir = tempfile.mkdtemp(prefix="issuebot-response-")
     response_path = str(Path(response_dir) / "response.json")
 
+    # The skills the board sent with this item, materialised on disk (cached by
+    # content, so only the first task on a board actually downloads anything).
+    # Appended after the repo's own `prov.plugin_dirs` rather than before, so a
+    # repository can add to what the board gives without displacing it.
+    bundle = source.agent_skills(job.work)
+
+    # Read here, alongside the launch, while the bundle is warm — carried on
+    # the `Response` (see its docstring) rather than left for a later,
+    # possibly colder-cached, delivery step to resolve.
+    guidance = bundle.body(PR_GUIDANCE_SLUG)
+
     try:
         spec = LaunchSpec(
             prompt=prompt,
@@ -472,8 +509,9 @@ def execute(
             resume_session_id=job.resume_session_id,
             env={**job.env, **job.forge_env, **prov.env, RESPONSE_ENV: response_path},
             mcp_servers=prov.mcp_servers + [s.to_fragment() for s in job.mcp_servers],
-            plugin_dirs=prov.plugin_dirs,
+            plugin_dirs=prov.plugin_dirs + ([bundle.plugin_dir] if bundle.plugin_dir else []),
             disallowed_tools=list(job.withheld_tools),
+            model=job.work.model,
         )
 
         # ``cancel`` is the abort signal: the caller sets it on Ctrl-C, and the
@@ -536,7 +574,9 @@ def execute(
         rep.finish(status, elapsed)
 
         if status == "done":
-            return _finish(job, workspace, prepared, settings, proc, result, response_path)
+            return _finish(
+                job, workspace, prepared, settings, proc, result, response_path, guidance=guidance
+            )
 
         return Response(status=status, result_text=status, session_id=result.session_id)
     finally:

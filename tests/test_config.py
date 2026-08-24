@@ -335,6 +335,31 @@ def test_several_harnesses_installed_refuses_to_guess(monkeypatch):
         harness_name(Config())
 
 
+def test_a_saved_config_naming_codex_fails_with_an_actionable_message():
+    """The one install that can still hit this: `.issuebear.toml` written
+    before Codex left the harness choice. It must fail to start rather than
+    silently run Codex with no skills (the exact bug this closes) or silently
+    switch to another harness (a different agent, at a different cost, with no
+    consent). The message names the setting and what to change, rather than
+    the generic "unknown harness" sentence — see `harness_name`'s docstring."""
+    with pytest.raises(plugins.UnknownPlugin, match='harness = "codex" is not supported') as exc:
+        harness_name(Config(harness="codex"))
+
+    assert "skills" in str(exc.value)
+    assert '"claude"' in str(exc.value)
+
+
+def test_codex_is_not_a_resolvable_harness():
+    """The implementation is kept (`plugins.harnesses.codex`), but the plugin
+    registers no `PLUGIN`, so it is invisible to the registry exactly like an
+    uninstalled plugin — not offered by the wizard, and not in any "known:"
+    list this module prints, so naming it never looks like a live choice."""
+    assert "codex" not in plugins.names_of("harnesses")
+    assert "codex" not in plugins.offered("harnesses")
+    with pytest.raises(plugins.UnknownPlugin, match="unknown harness 'codex'"):
+        plugins.get("harnesses", "codex")
+
+
 # --- executor_name ------------------------------------------------------------
 #
 # The third instance of the same shape, for the same reason: `executor` used to
@@ -415,7 +440,9 @@ class _RecordingHarness(Harness):
     def launch(self, spec, reporter, cancel=None):  # pragma: no cover - never run
         raise NotImplementedError
 
-    def summarize(self, diff, *, context, model, folder):  # pragma: no cover - never run
+    def summarize(  # pragma: no cover - never run
+        self, diff, *, context, model, folder, guidance=""
+    ):
         raise NotImplementedError
 
 

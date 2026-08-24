@@ -15,6 +15,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
+# Not TYPE_CHECKING-only, unlike the rest of this block: `agent_skills`'s
+# default implementation below instantiates `Bundle` at runtime, so this one
+# needs to be a real import rather than a signature-only one.
+from issuebot.board_skills import Bundle
+
 if TYPE_CHECKING:
     from issuebot.agent_state import ConnectionSnapshot
     from issuebot.config import Config, Connection
@@ -333,3 +338,14 @@ class Source(ABC):
     def agent_access(self, work: WorkItem) -> tuple[McpServer, ...]:
         """MCP servers giving the agent its own channel to this source, beyond
         whatever the environment already wires in — empty when there is none."""
+
+    def agent_skills(self, work: WorkItem) -> Bundle:
+        """The skills this item is worked with, materialised on disk.
+
+        The mirror of :meth:`agent_access`: that hook gives the agent its
+        channel to the source, this one gives it the source's instructions.
+        Both are the source's business because only a source knows what its
+        server said. The default is an empty bundle — a source that has no
+        notion of skills adds nothing to the launch.
+        """
+        return Bundle(plugin_dir=None)

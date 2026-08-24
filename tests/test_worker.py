@@ -22,7 +22,7 @@ from conftest import (
 )
 from issuebot import plugins, runner, worker
 from issuebot.config import Connection, conn_setting, harness_settings
-from issuebot.contracts import Response, WorkItem
+from issuebot.contracts import Response, SkillRef, WorkItem
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.plugins.workspaces.base import Workspace
 from issuebot.process import REAL
@@ -56,8 +56,13 @@ def cfg():
 
 @pytest.fixture
 def wire() -> WorkerEnv:
-    """What the controller would have sent for an ordinary cold boot."""
-    return WorkerEnv()
+    """What the controller would have sent for an ordinary cold boot.
+
+    Carries a minimal ``work_task`` document — a real controller always sends
+    one (`WorkerEnv.instructions`), and a worker run with none fails the
+    render (`prompts.MissingDocument`) rather than launching an agent blind.
+    """
+    return WorkerEnv(instructions={"work_task": "Task {reference}. {response_instructions}"})
 
 
 @pytest.fixture
@@ -173,6 +178,30 @@ def test_mention_context_is_taken_off_the_wire(cfg, ran):
     assert work.kind == "mention"
     assert work.actor_name == "Ada"
     assert work.comment_excerpt == "what do you think?"
+
+
+def test_skills_and_instructions_are_taken_off_the_wire(cfg, ran):
+    """Neither is on the task record either — the board resolves them once, at
+    poll time, from state the sandbox cannot re-query."""
+    wire = WorkerEnv(
+        skills=(SkillRef(id="s1", slug="board-planning", updated_at="2026-08-23T10:00:00Z"),),
+        instructions={"work_task": "Do {reference}."},
+    )
+    _run(cfg, wire)
+
+    work: WorkItem = ran["work"]
+    assert [s.slug for s in work.skills] == ["board-planning"]
+    assert work.instructions["work_task"] == "Do {reference}."
+
+
+def test_the_boards_run_preferences_are_taken_off_the_wire(cfg, ran):
+    wire = WorkerEnv(harness="codex", model="gpt-5", agent_instructions="Run the checks.")
+    _run(cfg, wire)
+
+    work: WorkItem = ran["work"]
+    assert work.harness == "codex"
+    assert work.model == "gpt-5"
+    assert work.agent_instructions == "Run the checks."
 
 
 def test_the_agent_id_is_taken_off_the_wire(cfg, ran):
@@ -446,7 +475,12 @@ def _run_work(conn: Connection, seen: dict) -> dict:
         _LinkedProjectApi(),
         FakeHarness(),
         conn,
-        WorkItem(task_id="t1", reference="ISS-1", repo=REPO),
+        WorkItem(
+            task_id="t1",
+            reference="ISS-1",
+            repo=REPO,
+            instructions={"work_task": "Task {reference}. {response_instructions}"},
+        ),
         run_id="R1",
         ctx=ctx(),
         reporter=ConsoleReporter(ref="ISS-1"),

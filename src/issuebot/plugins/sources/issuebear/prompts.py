@@ -1,18 +1,72 @@
-"""Render the launched-agent instruction prompt from the bundled template."""
+"""Render the launched-agent instruction prompt from the board's own document.
+
+The document text is no longer this runner's to keep: an organisation writes
+and edits it on the Parade board (`WorkItem.instructions`), and this module's
+job shrinks to filling in the tags such a document may use. Parade validates
+what an author writes against its own tag vocabulary, not against what any one
+render call here happens to need, so every render fills the whole vocabulary
+(see `_ALL_TAGS`) — `str.format` silently ignores whichever ones a particular
+document doesn't reference.
+"""
 
 from __future__ import annotations
 
-from importlib.resources import files
+from collections.abc import Sequence
 from typing import get_args
 
-from issuebot.contracts import OutputKind
-from issuebot.plugins.sources.issuebear.settings import DoneMode, Mode
+from issuebot.contracts import OutputKind, SkillRef
+from issuebot.plugins.sources.issuebear.settings import DoneMode
 from issuebot.plugins.workspaces.base import WorkspaceProblem
 from issuebot.run import RESPONSE_ENV
 
-_TEMPLATES = {"build": "templates/work_a_task.md", "respond": "templates/respond_a_task.md"}
+# The complete tag vocabulary Parade validates an instruction document
+# against. A document is authored by a person on the board, working from that
+# validation — not from which of these any one render call below actually
+# uses — so every tag gets a value (defaulting to "") on every render, and
+# `str.format` is left to ignore whichever ones the document doesn't mention.
+_ALL_TAGS = (
+    "reference",
+    "done",
+    "confirm",
+    "confirm_instruction",
+    "identity",
+    "response_instructions",
+    "skills",
+    "agent_instructions",
+    "actor_name",
+    "comment_excerpt",
+    "self_assign_instruction",
+)
 
-_MENTION_TEMPLATE = "templates/respond_to_mention.md"
+
+class MissingDocument(RuntimeError):
+    """The board sent no instruction document for this kind of work.
+
+    The runner carries no copy of its own, so there is nothing to fall back to
+    and nothing sensible to invent: an agent launched without its instructions
+    would do something, and that something is worse than a failed run.
+    """
+
+
+def _render(document: str, **tags: str) -> str:
+    """Fill `document` with Parade's whole eleven-tag vocabulary and return it.
+
+    Raises :class:`MissingDocument` when `document` is blank — a board that
+    sent no document for this kind of run, not a template this runner could
+    guess at. Every caller passes only the tags it actually has a value for;
+    the rest default to `""` here so a document that legitimately uses a tag
+    this render path doesn't happen to fill (say, a `work_task` document that
+    borrows `{actor_name}`) still renders instead of raising `KeyError`.
+    """
+    if not document:
+        raise MissingDocument(
+            "no instruction document for this run — the board sent none, and "
+            "the runner keeps no copy of its own to fall back to"
+        )
+    filled = dict.fromkeys(_ALL_TAGS, "")
+    filled.update(tags)
+    return document.format(**filled)
+
 
 # Every kind a run could possibly permit — the default for callers that
 # haven't been taught about `permits` yet.
@@ -121,6 +175,20 @@ _SELF_ASSIGN_NO_ID = (
 )
 
 
+def render_skills_line(skills: Sequence[SkillRef]) -> str:
+    """The sentence naming this run's skills, or "" when there are none.
+
+    Named rather than described: a headless `-p` run does not go looking
+    through skill descriptions for something that might apply, which is the
+    whole reason the prompt says which ones to use.
+    """
+    if not skills:
+        return ""
+    names = [f"**{s.slug}**" for s in skills]
+    joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+    return f"Use your {joined} skills to do this well."
+
+
 # What to do with `request_confirmation`, per the connection's `confirm` setting.
 # Both are instructions, not permissions: an agent left to decide for itself when
 # approval is "worth it" will decide differently every run.
@@ -140,57 +208,52 @@ _CONFIRM_INSTRUCTIONS = {
 
 def render_work_prompt(
     *,
+    document: str,
     reference: str,
     done: DoneMode,
     confirm: bool = True,
-    mode: Mode = "build",
     permits: frozenset[OutputKind] = ALL_OUTPUT_KINDS,
     agent_name: str = "",
     agent_id: str = "",
     requester_name: str = "",
     requester_id: str = "",
+    skills: Sequence[SkillRef] = (),
+    agent_instructions: str | None = None,
 ) -> str:
-    """Render the task-work prompt for the given reference and configuration.
+    """Render `document` — the board's `work_task` or `respond_task` document
+    (`source.py` picks which by the connection's `mode`) — for one launch.
 
-    The ``build`` template includes confirm/done hints; the ``respond`` template is
-    read-only (no confirm field). The mode selects the template. ``permits``
-    defaults to every kind so existing callers (still keyed off ``mode``, not a
-    ``Job``) get the full instruction; a caller that already knows the run's
-    actual latitude should pass it explicitly.
+    Raises :class:`MissingDocument` when `document` is blank. There used to be
+    a build/respond branch here to avoid handing an unused `{confirm}` to the
+    read-only document's `.format()` call; it is gone because `str.format`
+    already ignores extra keyword arguments, and now every document — whoever
+    wrote it, however it uses the vocabulary — is filled the same way.
 
     The four identity arguments name the agent and the task's requester
     (:func:`render_identity`). They default to empty because only the source
     can read them off the board, and neither lookup is worth failing a launch
     over — a prompt with no identity block is a working prompt.
     """
-    template = files("issuebot.plugins.sources.issuebear").joinpath(_TEMPLATES[mode]).read_text()
-    response_instructions = render_response_instructions(permits)
     identity = render_identity(
         agent_name=agent_name,
         agent_id=agent_id,
         requester_name=requester_name,
         requester_id=requester_id,
     )
-    # The template holds the slot on a line of its own, so the block carries the
+    # The document holds the slot on a line of its own, so the block carries the
     # blank lines that set it apart — and an empty block leaves none behind.
     if identity:
         identity = f"\n{identity}\n"
-    # The respond template has no {confirm} field; str.format() would accept the extra
-    # kwarg silently, but we keep the build/respond calls explicit.
-    if mode == "respond":
-        return template.format(
-            reference=reference,
-            done=done,
-            identity=identity,
-            response_instructions=response_instructions,
-        )
-    return template.format(
+    return _render(
+        document,
         reference=reference,
         done=done,
         confirm="yes" if confirm else "no",
         confirm_instruction=_CONFIRM_INSTRUCTIONS[bool(confirm)],
         identity=identity,
-        response_instructions=response_instructions,
+        response_instructions=render_response_instructions(permits),
+        skills=render_skills_line(skills),
+        agent_instructions=agent_instructions or "",
     )
 
 
@@ -281,23 +344,24 @@ def render_reconcile_preamble(problem: WorkspaceProblem) -> str:
 
 def render_mention_prompt(
     *,
+    document: str,
     reference: str,
     actor_name: str,
     comment_excerpt: str,
     agent_id: str,
     permits: frozenset[OutputKind] = ALL_OUTPUT_KINDS,
 ) -> str:
-    """Render the mention-session prompt for a task the agent was @mentioned on.
+    """Render `document` — the board's `respond_mention` document — for one
+    mention session.
 
-    The prompt tells the agent to read the task, then either reply (question/discussion)
-    or self-assign (asked to do work). When ``agent_id`` is non-empty the exact
-    ``update_task`` call is embedded; when it is empty (runner could not call GET /me)
-    the self-assign block is replaced with a note to reply instead. ``permits``
-    defaults to every kind — a mention-shaped ``Job`` (no ``changes``) should pass
-    its own narrower set once a caller has one to give.
+    Raises :class:`MissingDocument` when `document` is blank. The prompt tells
+    the agent to read the task, then either reply (question/discussion) or
+    self-assign (asked to do work). When ``agent_id`` is non-empty the exact
+    ``update_task`` call is embedded; when it is empty (runner could not call
+    GET /me) the self-assign block is replaced with a note to reply instead.
+    ``permits`` defaults to every kind — a mention-shaped ``Job`` (no
+    ``changes``) should pass its own narrower set once a caller has one to give.
     """
-    template = files("issuebot.plugins.sources.issuebear").joinpath(_MENTION_TEMPLATE).read_text()
-
     if agent_id:
         # Build the concrete self-assign instruction with the agent's own user id.
         self_assign_instruction = _SELF_ASSIGN_WITH_ID.format(
@@ -307,7 +371,8 @@ def render_mention_prompt(
         # Degraded mode: runner couldn't resolve the id, so the agent can only reply.
         self_assign_instruction = _SELF_ASSIGN_NO_ID
 
-    return template.format(
+    return _render(
+        document,
         reference=reference,
         actor_name=actor_name,
         comment_excerpt=comment_excerpt,

@@ -426,3 +426,14 @@ class IssuebotClient:
         """Return the project record for ``project_id``, including its linked
         GitHub repository (``github_repo``), if any."""
         return self._json(self._http.get(f"/projects/{project_id}"))
+
+    def download_skill(self, skill_id: str) -> bytes:
+        """Return one skill's folder as a zip (GET /skills/{id}/download).
+
+        Unlike every other method here, the body isn't JSON, so it can't go
+        through :meth:`_json` — the status is checked directly and the raw
+        bytes are handed back for :mod:`issuebot.board_skills` to unpack."""
+        resp = self._http.get(f"/skills/{skill_id}/download")
+        if resp.status_code >= 400:
+            raise ApiError(resp.status_code, resp.text)
+        return resp.content

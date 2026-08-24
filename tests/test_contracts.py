@@ -26,6 +26,49 @@ def test_a_work_item_is_built_from_a_source_payload():
     assert item.ref == "ISS-1"
 
 
+def test_from_api_reads_skills_and_instructions():
+    item = WorkItem.from_api(
+        {
+            "task_id": "t1",
+            "board_id": "b1",
+            "skills": [
+                {
+                    "id": "s1",
+                    "slug": "board-planning",
+                    "name": "Board planning",
+                    "updated_at": "2026-08-23T10:00:00Z",
+                }
+            ],
+            "instructions": {"work_task": "Do {reference}."},
+        }
+    )
+    assert [s.slug for s in item.skills] == ["board-planning"]
+    assert item.instructions["work_task"] == "Do {reference}."
+
+
+def test_from_api_reads_the_harness_model_and_agent_instructions():
+    item = WorkItem.from_api(
+        {
+            "task_id": "t1",
+            "harness": "codex",
+            "model": "gpt-5",
+            "agent_instructions": "Run the checks.",
+        }
+    )
+    assert item.harness == "codex"
+    assert item.model == "gpt-5"
+    assert item.agent_instructions == "Run the checks."
+
+
+def test_an_item_with_neither_has_empty_defaults():
+    item = WorkItem.from_api({"task_id": "t1"})
+    assert item.skills == ()
+    assert item.instructions == {}
+    assert item.harness is None
+    assert item.model is None
+    assert item.agent_instructions is None
+
+
 def test_the_ref_falls_back_to_the_task_id():
     assert WorkItem(task_id="t1").ref == "t1"
 

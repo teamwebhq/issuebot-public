@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from conftest import FakeApi, FakeWorkspace, RecordingReporter, connection, wiring, work
+from conftest import FakeSource, FakeWorkspace, RecordingReporter, connection, wiring, work
 from issuebot.contracts import Answer, Changed, Handoff, Job
 from issuebot.plugins.harnesses.base import LaunchSpec
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
@@ -49,7 +49,10 @@ def _run(job=None, *, harness=None, **overrides):
         harness=harness or FakeHarness(),
         workspace=overrides.pop("workspace", None) or FakeWorkspace(),
         workspace_settings=_NoSettings(),
-        source=overrides.pop("source", None) or FakeApi(),
+        # A real `Source` double, not `FakeApi` (the board client): `execute`
+        # calls `Source`-only methods on this unconditionally (see test_run.py's
+        # own `_run`).
+        source=overrides.pop("source", None) or FakeSource(),
     )
     kwargs: dict = dict(reporter=RecordingReporter())
     kwargs.update(overrides)

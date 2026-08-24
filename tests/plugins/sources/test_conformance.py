@@ -119,10 +119,25 @@ def test_a_source_with_no_lease_concept_inherits_a_noop_heartbeat() -> None:
     _Leaseless().heartbeat("r-1")  # must not raise
 
 
+def test_a_source_with_no_notion_of_skills_inherits_an_empty_bundle() -> None:
+    """`agent_skills` is concrete on the ABC for the same reason `heartbeat`
+    is: a source that never heard of the board's skill feature still answers
+    with something `run.execute` can hand straight to `LaunchSpec.plugin_dirs`."""
+    bundle = _Leaseless().agent_skills(work())
+    assert bundle.plugin_dir is None
+
+
 def test_agent_access_is_a_tuple_of_mcp_servers(source: Source) -> None:
     access = source.agent_access(work())
     assert isinstance(access, tuple)
     assert all(isinstance(server, McpServer) for server in access)
+
+
+def test_agent_skills_is_empty_when_the_item_carries_none(source: Source) -> None:
+    """Every installed source, not just the ABC default: an item that names no
+    skills gets no plugin dir, whether that answer comes from `Source.agent_skills`'s
+    own default or from a real implementation asked for nothing."""
+    assert source.agent_skills(work()).plugin_dir is None
 
 
 def test_prompt_carries_the_reference(source: Source) -> None:

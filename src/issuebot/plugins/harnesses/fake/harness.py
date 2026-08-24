@@ -78,7 +78,7 @@ class FakeHarness(Harness):
         self._writes_response = writes_response
         self._response_raw = response_raw
         self.calls: list[LaunchSpec] = []
-        self.summarize_calls: list[tuple[str, str, str | None, str]] = []
+        self.summarize_calls: list[tuple[str, str, str | None, str, str]] = []
 
     def launch(
         self,
@@ -108,7 +108,9 @@ class FakeHarness(Harness):
             result_text=self._result_text,
         )
 
-    def summarize(self, diff: str, *, context: str, model: str | None, folder: str) -> str:
+    def summarize(
+        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
+    ) -> str:
         """Record the call and return the configured canned summary."""
-        self.summarize_calls.append((diff, context, model, folder))
+        self.summarize_calls.append((diff, context, model, folder, guidance))
         return self._summary

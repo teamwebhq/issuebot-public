@@ -5,37 +5,10 @@ is Claude-only."""
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from conftest import SpawnRecorder
 from issuebot.plugins.harnesses.base import LaunchSpec
 from issuebot.plugins.harnesses.claude.harness import ClaudeHarness
-
-
-class PluginDirRecorder(SpawnRecorder):
-    """A SpawnRecorder that also reads the `--plugin-dir` this harness passes.
-
-    Here rather than in `conftest`: the flag and the manifest layout inside the
-    directory are this agent CLI's own, and no other harness's tests can use
-    them. Read during spawn because the directory is a subdir of the launch's
-    own temp dir and is gone by the time `launch()` returns."""
-
-    def __init__(self, exit_code: int = 0, lines: list[str] | None = None):
-        super().__init__(exit_code=exit_code, lines=lines)
-        self.plugin_manifest: dict | None = None
-        self.plugin_has_board_skill = False
-
-    def spawn(self, argv, *, on_line, cwd=None, env=None, cancel=None) -> int:
-        if "--plugin-dir" in argv:
-            plugin_dir = Path(argv[argv.index("--plugin-dir") + 1])
-            manifest = plugin_dir / ".claude-plugin" / "plugin.json"
-            if manifest.is_file():
-                self.plugin_manifest = json.loads(manifest.read_text())
-            self.plugin_has_board_skill = (
-                plugin_dir / "skills" / "board-implementing" / "SKILL.md"
-            ).is_file()
-        return super().spawn(argv, on_line=on_line, cwd=cwd, env=env, cancel=cancel)
-
 
 # One server fragment, in the shape a source hands one over. This harness is
 # told nothing about where it came from, which is what makes it worth asserting.
@@ -135,26 +108,6 @@ def test_claude_custom_command(reporter):
 
     assert spawn.argv is not None
     assert spawn.argv[0] == "/usr/local/bin/claude"
-
-
-def test_claude_loads_bundled_plugin_dir(reporter):
-    spawn = PluginDirRecorder()
-    harness = ClaudeHarness(command="claude", proc=spawn)
-
-    harness.launch(_spec(), reporter)
-
-    assert spawn.argv is not None
-    assert "--plugin-dir" in spawn.argv
-    # PluginDirRecorder reads the manifest while the directory still exists
-    # (during spawn); see below for why it can't be read after launch() returns.
-    assert spawn.plugin_manifest is not None
-    assert spawn.plugin_manifest["name"] == "issuebot-board"
-    assert spawn.plugin_has_board_skill
-
-    # Regression: the plugin dir is a subdir of the launch's own temp dir, so
-    # it must be gone once launch() returns -- not leaked per launch/retry.
-    plugin = spawn.argv[spawn.argv.index("--plugin-dir") + 1]
-    assert not Path(plugin).exists()
 
 
 def test_claude_adds_resume_when_session_id_present(reporter):
@@ -342,18 +295,6 @@ def test_summarize_builds_toolless_argv_and_returns_text():
     assert spawn.cwd == "/repo"
 
 
-def test_summarize_prompt_carries_the_pr_writing_guidance():
-    """The summarizer runs tools-free, so it never loads the skill itself --
-    the guidance has to travel in the prompt or it does not reach the model."""
-    spawn = SpawnRecorder(lines=["Add widget", "body"])
-    harness = ClaudeHarness(command="claude", proc=spawn)
-    harness.summarize("DIFF", context="ISS-1", model=None, folder="/repo")
-
-    prompt = spawn.stdin or ""
-    assert "DIFF" in prompt
-    assert "reviewer" in prompt.lower()
-
-
 def test_summarize_sends_the_prompt_on_stdin_not_the_command_line():
     """A diff-carrying prompt is far larger than a single argv entry may be, so
     it travels on stdin; putting it in argv fails the exec entirely."""
@@ -364,3 +305,16 @@ def test_summarize_sends_the_prompt_on_stdin_not_the_command_line():
 
     assert big in (spawn.stdin or "")
     assert all(big not in arg for arg in spawn.argv)
+
+
+def test_summarize_weaves_the_boards_guidance_into_the_prompt():
+    """`guidance` is `Delivery.guidance` -- the board's own `writing-pull-requests`
+    skill, already resolved -- and reaches this tools-free call the only way it
+    can: inlined into the prompt on stdin."""
+    spawn = SpawnRecorder(lines=["Add widget", "body"])
+    harness = ClaudeHarness(command="claude", proc=spawn)
+    harness.summarize(
+        "DIFF", context="ISS-1", model=None, folder="/repo", guidance="Title in the imperative."
+    )
+
+    assert "Title in the imperative." in (spawn.stdin or "")

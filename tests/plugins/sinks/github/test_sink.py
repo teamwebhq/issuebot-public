@@ -38,12 +38,14 @@ def _delivery(
     repo: str = "https://github.com/o/r.git",
     folder: str = "/repo",
     ref: str = "ISS-1",
+    guidance: str = "",
 ) -> Delivery:
     return Delivery(
         work=work(reference=ref),
         output=Changed(summary=summary),
         changes=_changes() if changes is _DEFAULT_CHANGES else changes,  # type: ignore[arg-type]
         repo=repo,
+        guidance=guidance,
         folder=folder,
     )
 
@@ -301,15 +303,28 @@ def test_uses_the_harness_summary_when_one_is_available() -> None:
     assert result.ok
     assert result.summary == "opened PR"
     assert len(harness.summarize_calls) == 1
-    diff, context, model, folder = harness.summarize_calls[0]
+    diff, context, model, folder, guidance = harness.summarize_calls[0]
     assert diff == "--- a\n+++ b\n"
     assert context == "did the thing"  # the agent's own Changed.summary
     assert model == "haiku"
     assert folder == "/repo"
+    assert guidance == ""  # the delivery carried none
 
     create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
     assert create[create.index("--title") + 1].endswith("Add the widget")
     assert "Because it was missing." in create[create.index("--body") + 1]
+
+
+def test_the_pr_summary_call_carries_the_boards_guidance() -> None:
+    """`Delivery.guidance` — the board's `writing-pull-requests` skill, already
+    resolved by `run.execute` — reaches the summarizer call unchanged."""
+    proc = _happy(**{"git diff": completed(out="--- a\n+++ b\n")})
+    harness = FakeHarness(summary="Add the widget")
+
+    GitHubSink(harness=harness, proc=proc).deliver(_delivery(guidance="Title in the imperative."))
+
+    assert len(harness.summarize_calls) == 1
+    assert harness.summarize_calls[0][4] == "Title in the imperative."
 
 
 def test_a_checkout_reads_its_diff_locally_and_asks_the_forge_for_nothing() -> None:
@@ -333,10 +348,14 @@ class _CwdWatchingHarness(FakeHarness):
 
     folder_existed = False
 
-    def summarize(self, diff: str, *, context: str, model: str | None, folder: str) -> str:
+    def summarize(
+        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
+    ) -> str:
         """Note the cwd's existence, then answer as FakeHarness does."""
         self.folder_existed = bool(folder) and Path(folder).is_dir()
-        return super().summarize(diff, context=context, model=model, folder=folder)
+        return super().summarize(
+            diff, context=context, model=model, folder=folder, guidance=guidance
+        )
 
 
 def test_no_checkout_still_gets_the_model_written_description() -> None:
@@ -352,7 +371,7 @@ def test_no_checkout_still_gets_the_model_written_description() -> None:
     assert result.ok
     assert result.summary == "opened PR"
 
-    diff, _, _, _ = harness.summarize_calls[0]
+    diff, _, _, _, _ = harness.summarize_calls[0]
     assert diff == "--- a\n+++ b\n"
     assert harness.folder_existed  # a real cwd, never the listener's own
 

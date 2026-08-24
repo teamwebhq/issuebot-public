@@ -31,9 +31,10 @@ from typer.testing import CliRunner
 
 import issuebot
 from issuebot import plugins, release, runner
+from issuebot.board_skills import Bundle
 from issuebot.config import Config, Connection, source_plugin
 from issuebot.context import RunnerContext
-from issuebot.contracts import Changes, McpServer, WorkItem
+from issuebot.contracts import Changes, McpServer, SkillRef, WorkItem
 from issuebot.plugins.sources.base import Source
 from issuebot.plugins.workspaces.base import Prepared, Workspace, WorkspaceProblem
 from issuebot.process import REAL, Completed, Process, RecordingProcess
@@ -41,6 +42,28 @@ from issuebot.process import REAL, Completed, Process, RecordingProcess
 # ---------------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------------
+
+# Stand-in board documents for `work()`/`mention()`'s default `instructions`.
+# A real board always sends one; a test that only wants "a WorkItem" (rather
+# than specifically exercising document content) still gets a `.prompt()`
+# that renders, without every one of those call sites having to invent its
+# own document. Each references the tags `prompts.render_work_prompt`/
+# `render_mention_prompt` actually fill for that kind, so the fields those
+# render functions already thread through (reference, done, identity, skills,
+# agent_instructions, actor_name, comment_excerpt, self_assign_instruction,
+# response_instructions) show up in a rendered prompt the way a real board's
+# would. A test that cares what the document itself says passes its own
+# `instructions=` explicitly and this default never comes into play.
+_STUB_INSTRUCTIONS = {
+    "work_task": (
+        "Task {reference} (done: {done}, confirm: {confirm}). {confirm_instruction}\n"
+        "{identity}\n{skills}\n{agent_instructions}\n{response_instructions}"
+    ),
+    "respond_task": "Task {reference} (done: {done}).\n{identity}\n{response_instructions}",
+    "respond_mention": (
+        "{actor_name} said: {comment_excerpt}\n{self_assign_instruction}\n{response_instructions}"
+    ),
+}
 
 
 def work(
@@ -52,8 +75,20 @@ def work(
     notification_id: str | None = None,
     actor_name: str | None = None,
     comment_excerpt: str | None = None,
+    skills: tuple[SkillRef, ...] = (),
+    instructions: dict[str, str] | None = None,
+    harness: str | None = None,
+    model: str | None = None,
+    agent_instructions: str | None = None,
 ) -> WorkItem:
-    """A work item, with the fields a test cares about and defaults for the rest."""
+    """A work item, with the fields a test cares about and defaults for the rest.
+
+    ``instructions`` defaults to :data:`_STUB_INSTRUCTIONS` rather than `{}` —
+    unlike every other field here, an empty dict is not "unset", it is what a
+    real board sends this WorkItem when it genuinely has no document for a
+    run's kind, and `prompts.MissingDocument` treats those the same. A test
+    of that failure passes ``instructions={}`` explicitly.
+    """
     return WorkItem(
         task_id=task_id,
         reference=reference,
@@ -62,6 +97,11 @@ def work(
         notification_id=notification_id,
         actor_name=actor_name,
         comment_excerpt=comment_excerpt,
+        skills=skills,
+        instructions=_STUB_INSTRUCTIONS if instructions is None else instructions,
+        harness=harness,
+        model=model,
+        agent_instructions=agent_instructions,
     )
 
 
@@ -266,8 +306,8 @@ def config(**overrides: Any) -> Config:
     simplest working shape.
 
     A harness has to be named: there is no privileged default any more, and this
-    install has three to choose from, so a config that named none would not
-    validate. `fake` is the one a core test means whichever harness ships —
+    install has more than one to choose from, so a config that named none would
+    not validate. `fake` is the one a core test means whichever harness ships —
     it records launches instead of spawning a CLI — and it is production code
     (`plugins/harnesses/fake`), not a double defined here."""
     base: dict[str, Any] = {"harness": "fake", **source_table()}
@@ -328,6 +368,7 @@ class FakeApi:
         self.mention_claims: list[str] = []
         self.member_lookups: list[str] = []
         self.telemetry: list[dict[str, Any]] = []
+        self.skill_downloads: list[str] = []
         self.released = threading.Event()
 
     # -- the two work lists --------------------------------------------------
@@ -417,6 +458,19 @@ class FakeApi:
     def list_board_members(self, board_id: str) -> list[dict[str, Any]]:
         self.member_lookups.append(board_id)
         return list(self._members)
+
+    def download_skill(self, skill_id: str) -> bytes:
+        """A skill's raw zip bytes. Unlike `git_credentials`, `agent_skills` has
+        no try/except around this call — a source that names any skill needs a
+        real answer here, not a silent AttributeError — so every `FakeApi`
+        carries this rather than only the tests that care about content
+        (contrast `_Board.git_credentials` in `test_forge_credentials.py`,
+        which stays a subclass-only extra because `forge_env` degrades past a
+        missing one). Empty bytes are enough for callers that never unpack a
+        real skill; `_SkillClient` in `test_source.py` overrides this for the
+        ones that do."""
+        self.skill_downloads.append(skill_id)
+        return b""
 
     # -- connection lifecycle ----------------------------------------------
 
@@ -592,10 +646,12 @@ class FakeSource(Source):
         permits: frozenset[str] | None = None,
         prompt: str = "do the thing",
         access: tuple[McpServer, ...] = (),
+        skills: Bundle | None = None,
     ) -> None:
         self._permits = permits or frozenset({"changes", "answer", "needs_input", "handoff"})
         self._prompt = prompt
         self._access = access
+        self._skills = skills or Bundle(plugin_dir=None)
         self.said: list[tuple[str, str]] = []
         self.applied: list[Any] = []
         self.finished: list[Any] = []
@@ -642,6 +698,9 @@ class FakeSource(Source):
 
     def agent_access(self, work) -> tuple[McpServer, ...]:
         return self._access
+
+    def agent_skills(self, work) -> Bundle:
+        return self._skills
 
     def heartbeat(self, run_id: str) -> None:
         """Recorded, so a test can assert the pipeline kept the run alive."""

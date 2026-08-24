@@ -61,7 +61,7 @@ def setup() -> Config:
     # a minimal PATH — often just /usr/bin:/bin — so a bare name that a human
     # finds in their login shell is a name the service cannot find, and the
     # failure only surfaces later, inside a task. The harness plugin's name
-    # ("claude", "codex") is assumed to be the executable's name.
+    # (e.g. "claude") is assumed to be the executable's name.
     #
     # Nothing found is not an error: the config may be being written on one box
     # for another. Then the default stays empty, and blank means "resolve the

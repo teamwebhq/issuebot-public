@@ -48,6 +48,11 @@ class LaunchSpec:
     # run's read-only-ness is enforced by `Source.permits` barring `changes`,
     # not by removing tools — ADR-0011).
     disallowed_tools: list[str] = field(default_factory=list)
+    # The model to run this task with, as the board requested it
+    # (`WorkItem.model`) — passed straight through with no validation. Not
+    # every harness's CLI takes a model override; one that does not simply
+    # leaves this unread, the same way an unsupported flag would be ignored.
+    model: str | None = None
 
     def mcp_document(self) -> dict[str, Any]:
         """This launch's servers as one `{"mcpServers": {...}}` document.
@@ -131,7 +136,14 @@ class Harness(ABC):
         Return its exit info."""
 
     @abstractmethod
-    def summarize(self, diff: str, *, context: str, model: str | None, folder: str) -> str:
+    def summarize(
+        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
+    ) -> str:
         """Generate PR title+body text from a diff. Tools-free and MCP-free; the
         first output line is the title, the rest is the body. ``folder`` is the
-        cwd to run in. May raise; callers fall back to a mechanical description."""
+        cwd to run in. May raise; callers fall back to a mechanical description.
+
+        ``guidance`` is the board's own PR-writing guidance for this run
+        (``Delivery.guidance``, already resolved prose), to weave into the
+        prompt however this harness's call shape allows; empty when the board
+        sent none."""

@@ -115,7 +115,16 @@ def test_an_item_with_no_kind_is_treated_as_assigned() -> None:
     api = MentionApi()
     listener = ProjectListener(wiring(_PROJECT, api=api, environment=ex))
 
-    listener._process(WorkItem.from_api({"task_id": "t1", "reference": "ISS-1", "board_id": "b"}))
+    listener._process(
+        WorkItem.from_api(
+            {
+                "task_id": "t1",
+                "reference": "ISS-1",
+                "board_id": "b",
+                "instructions": {"work_task": "Task {reference}. {response_instructions}"},
+            }
+        )
+    )
 
     assert api.claims == ["t1"]
     assert [w.kind for w in ex.ran] == ["assigned"]

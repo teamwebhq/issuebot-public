@@ -229,6 +229,7 @@ def _describe(
     *,
     harness: Harness | None,
     model: str | None,
+    guidance: str,
     ref: str,
 ) -> tuple[str, str, str]:
     """The PR ``(title, body, fallback_reason)``: ask the harness to turn the
@@ -238,6 +239,10 @@ def _describe(
     ``local_run._describe`` used, just built from ``Changes``/the agent's own
     ``summary`` output instead of a board fetch, since a sink has no source of
     its own to ask for a task's title.
+
+    ``guidance`` is ``Delivery.guidance`` (the board's own PR-writing skill,
+    already resolved), forwarded to the harness untouched — this function does
+    not read it itself, only carries it to where it is used.
 
     ``fallback_reason`` is empty when the model wrote the description and a
     short phrase naming the rung that was taken when it did not. The caller puts
@@ -261,7 +266,11 @@ def _describe(
                 # listener itself happens to be sitting in.
                 with tempfile.TemporaryDirectory() as scratch:
                     text = harness.summarize(
-                        diff, context=summary, model=model, folder=folder or scratch
+                        diff,
+                        context=summary,
+                        model=model,
+                        folder=folder or scratch,
+                        guidance=guidance,
                     ).strip()
 
             except Exception as exc:  # noqa: BLE001 - a summarizer failure falls back, never fails the PR
@@ -375,6 +384,7 @@ class GitHubSink(Sink):
             delivery.output.summary,
             harness=self._harness,
             model=self._summary_model,
+            guidance=delivery.guidance,
             ref=delivery.work.ref,
         )
         url = _open_pr(proc, repo, changes.branch, _signed(body, delivery), title=title)

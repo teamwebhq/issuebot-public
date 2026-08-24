@@ -6,7 +6,7 @@ these steps:
 1. It finds a task that the board gives to your agent identity.
 2. It claims the task.
 3. It prepares a workspace.
-4. It starts an agent CLI (Claude Code or Codex) to do the task.
+4. It starts an agent CLI (Claude Code) to do the task.
 5. It publishes the result.
 
 issuebot has five plugin axes:
@@ -16,7 +16,7 @@ issuebot has five plugin axes:
 | **source** | where the tasks come from, and what a run can report | `issuebear` |
 | **workspace** | where issuebot prepares the working copy | `git`, `folder` |
 | **environment** | which machine the agent runs on | `local`, `railway` |
-| **harness** | which agent CLI issuebot starts | `claude`, `codex` |
+| **harness** | which agent CLI issuebot starts | `claude` |
 | **sink** | where issuebot publishes a result | `github` |
 
 Each plugin can add configuration keys, `issuebot doctor` checks, and commands.
@@ -245,7 +245,7 @@ you do not give a name, issuebot uses the one installed harness or environment.
 If more than one is installed, issuebot reports this:
 
 ```text
-no harness named, and 3 are installed — set harness = "…" (known: claude, codex, fake)
+no harness named, and 2 are installed — set harness = "…" (known: claude, fake)
 connection 'web': no environment named, and 2 are installed — set executor = "…" (known: local, railway)
 ```
 
@@ -627,8 +627,9 @@ accepts only `changes` from a pushed branch. It does these steps:
 4. **Do a check of the remote branch** — the sink uses the GitHub compare API.
    The branch head must be after its base.
 5. **Make the description** — the harness makes the pull request title and body
-   from the local diff. The `[github]
-   summary_model` key sets the model.
+   from the local diff, following the board's `writing-pull-requests` skill
+   when it sent one (see [Skills, plans and confirmation](#skills-plans-and-confirmation)).
+   The `[github] summary_model` key sets the model.
 6. **Find an open pull request** — the sink uses an open pull request that it
    finds for the branch.
 7. **Open a pull request** — if the sink does not find an open pull request, it
@@ -795,7 +796,22 @@ the `harness` key in the configuration.
   other MCP servers. issuebot also uses `--dangerously-skip-permissions`,
   because an unattended runner cannot give approvals, and
   `--output-format stream-json` for the live feed and the log.
-- **`codex`** — Codex without a terminal (`codex exec …`).
+
+`claude` is the only harness `issuebot init` offers, and the only value the
+`harness` key accepts. A Codex harness (`codex exec …`) exists in the
+codebase but is not offered or selectable — see
+[Skills, plans and confirmation](#skills-plans-and-confirmation) for why. A
+config left over from before this change that still says `harness = "codex"`
+refuses to load; the error names the setting and tells you to change it to
+`claude`.
+
+A task from the board can ask for a harness or a model by name. That request
+is not an order: issuebot always runs the harness this install is configured
+with, and only logs a warning naming both if the two disagree — a preference
+set on a machine the board cannot see never fails a run. A requested model is
+passed straight through to the `claude` harness's own `--model` flag with no
+matching against anything; an unrecognised name is the harness's own error to
+raise.
 
 The CLI must be on your `PATH`. `issuebot doctor` examines it. If the CLI is
 not on your `PATH`, give the path at `issuebot init`, or set the path in the
@@ -840,8 +856,9 @@ the sessions.
 
 The `resume_sessions` key controls the local environment. In a Railway sandbox,
 issuebot always keeps the session of a paused task and continues it on the next
-run. Only `claude` has sessions. Thus a codex run in a sandbox restores the
-worktree, but starts a new conversation.
+run. Only `claude` has sessions, which is currently every harness you can
+select — a harness without sessions would restore the worktree in a sandbox
+but start a new conversation each run.
 
 ## Monitor a run
 
@@ -942,32 +959,28 @@ connections.
 
 ## Skills, plans and confirmation
 
-On the `claude` harness, issuebot loads four board skills into each agent with
-`--plugin-dir`. Your own skills stay available.
+The board selects which skills an agent works a task with, and sends them with
+the task. On the `claude` harness, issuebot fetches and caches whatever the
+board selected, then loads it into the agent with `--plugin-dir`, alongside
+your own skills. A task the board sends no skills for runs with none — that is
+the board's decision, not a degraded install.
 
-- **`board-brainstorming`** — if the scope, the requirements or the approach of
-  a task are not clear, the agent writes its questions on the task as a form.
-  The agent uses multiple choice when it can. Then it assigns the task back.
-- **`board-implementing`** — if the requirements are clear, the agent writes its
-  plan on the task, works test-first, obeys the `CLAUDE.md` or `AGENTS.md` file
-  of the repository, writes comments as it works, and obeys the done-mode.
-- **`board-planning`** — if the agent finds work that the task does not cover,
-  the agent writes a new task and does not make the branch larger. The skill
-  shows the agent where work goes: the plan, a checklist, a sub-task or a new
-  task. It also gives the shape of a task description, in three parts — why the
-  work is necessary, the expected outcome, then the technical detail. People who
-  do not read code read the first two parts.
-- **`writing-pull-requests`** — the shape of a pull request that a person can
-  review: the reason for the change first, then the changes, the tests, and the
-  items to examine by hand.
+**Skill loading is `claude`-only, which is why Codex is not a selectable
+harness (see [Harnesses](#harnesses)).** `--plugin-dir` is a Claude Code flag
+with no Codex equivalent, and the prompt document naming a skill is written
+once and shared by every harness — nothing in it is harness-aware, so it
+cannot suppress "Use your **X** skills to do this well" for a harness that
+never loaded any. A Codex run would see that sentence with nothing behind it,
+for every skill the board sent. Rather than ship that silently, `harness =
+"codex"` is refused outright until Codex has its own way to receive the
+board's skills.
 
-The first three skills are only for the `claude` harness. On the `codex`
-harness, the prompt gives the same instructions.
-
-`writing-pull-requests` is different. The pull request text comes from a
-separate agent call that has no tools and loads no skills, thus issuebot puts
-the text of that skill directly in the prompt. To change how issuebot writes
-pull requests, change that one file.
+One of those skills gets a second use. When the `github` sink asks the harness
+to write a pull request description (see [Sinks](#sinks)), it carries the
+board's `writing-pull-requests` skill along, already resolved to plain prose,
+and the harness weaves it into that tools-free call. That call loads no
+plugin, so this is the only way the board's guidance reaches it — a task the
+board sends no such skill for gets a plain description with none.
 
 The board gives the agent three tools:
 

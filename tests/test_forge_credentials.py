@@ -161,7 +161,7 @@ def test_the_run_pushes_and_works_with_the_lent_token():
         connection(),
         harness=FakeHarness(on_launch=lambda spec: launched.append(dict(spec.env))),
         workspace=workspace,
-        source=FakeApi(),
+        source=_source(FakeApi()),
         context=ctx(),
     )
 

@@ -22,7 +22,6 @@ from pydantic import BaseModel
 
 import issuebot.run as run_module
 from conftest import (
-    FakeApi,
     FakeSource,
     FakeWorkspace,
     RecordingReporter,
@@ -32,12 +31,14 @@ from conftest import (
     work,
 )
 from issuebot.agent_state import AgentState
+from issuebot.board_skills import Bundle
 from issuebot.contracts import Changes, Job, McpServer
 from issuebot.plugins.harnesses.base import LaunchResult, LaunchSpec
 from issuebot.plugins.harnesses.fake.harness import FakeHarness, write_response
 from issuebot.plugins.workspaces.base import WorkspaceProblem
 from issuebot.provision import ProvisionResult
 from issuebot.run import RESPONSE_ENV, execute
+from issuebot.runner import job_for
 
 ALL_PERMITS = frozenset({"changes", "answer", "needs_input", "handoff"})
 
@@ -81,7 +82,11 @@ def _run(
         harness=harness or FakeHarness(),
         workspace=workspace or FakeWorkspace(),
         workspace_settings=_NoSettings(),
-        source=source if source is not None else FakeApi(),
+        # A real `Source` double, not `FakeApi` (the board *client*): `execute`
+        # calls `Source`-only methods on this unconditionally (`agent_skills`,
+        # and `heartbeat`/`prompt` when their guards are open), which only a
+        # `Source` implements.
+        source=source if source is not None else FakeSource(),
         context=ctx(state=state, heartbeat_interval=heartbeat_interval),
     )
     kwargs: dict = dict(reporter=RecordingReporter())
@@ -447,7 +452,7 @@ def test_no_run_id_skips_the_heartbeat():
     """A mention claimed while the agent already holds a working claim on the
     task gets no responding run of its own — nothing to heartbeat, so the
     thread must not even start."""
-    source = FakeApi()
+    source = FakeSource()
     _run(source=source, heartbeat_interval=0.01)  # _job() carries no run_id
     assert source.heartbeats == []
 
@@ -504,6 +509,61 @@ def test_the_launch_gets_the_repos_env_and_plugin_dirs(monkeypatch):
     assert spec.env["TOKEN"] == "t"
     assert spec.env[RESPONSE_ENV]  # the run's own variable survives the merge
     assert spec.plugin_dirs == ["/repo/.claude/plugins"]
+
+
+def test_the_boards_skill_bundle_is_appended_after_the_repos_own_plugin_dirs(monkeypatch):
+    """`Source.agent_skills` supplies a plugin dir of its own (the board's
+    skill bundle), appended *after* the repo's own bootstrap dirs -- so a
+    repository can add to what the board gives, never displace it."""
+    _bootstrap(monkeypatch, plugin_dirs=["/repo/.claude/plugins"])
+    harness = FakeHarness()
+    source = FakeSource(skills=Bundle(plugin_dir="/board/skills"))
+
+    _run(harness=harness, source=source)
+
+    assert harness.calls[0].plugin_dirs == ["/repo/.claude/plugins", "/board/skills"]
+
+
+def test_no_skill_bundle_adds_no_plugin_dir():
+    """A board that selected no skills for this item contributes nothing --
+    the intended answer, not a degraded one (`FakeSource`'s own default)."""
+    harness = FakeHarness()
+    _run(harness=harness)
+    assert harness.calls[0].plugin_dirs == []
+
+
+# ---------------------------------------------------------------------------
+# The PR-writing guidance rides the response, resolved while the bundle is warm
+# ---------------------------------------------------------------------------
+
+
+def _bundle_with_guidance(tmp_path, text: str) -> Bundle:
+    """A `Bundle` whose `writing-pull-requests` skill reads `text`, without
+    going through a real fetch/unpack -- `board_skills.build` already has its
+    own tests for that half."""
+    root = tmp_path / "bundle"
+    skill_dir = root / "skills" / "writing-pull-requests"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(text)
+    return Bundle(plugin_dir=str(root), _root=root)
+
+
+def test_the_boards_pr_guidance_rides_on_the_response(tmp_path):
+    """`Response.guidance` is the board's `writing-pull-requests` skill, read
+    here -- alongside the launch, while the bundle is warm -- rather than left
+    for `deliver_all`'s sink to resolve later on a possibly different machine."""
+    bundle = _bundle_with_guidance(tmp_path, "Title in the imperative.")
+
+    response = _run(harness=FakeHarness(), source=FakeSource(skills=bundle))
+
+    assert response.guidance == "Title in the imperative."
+
+
+def test_no_guidance_skill_leaves_the_response_blank():
+    """A board that sent no `writing-pull-requests` skill (or none at all)
+    leaves `Response.guidance` empty, same as `Bundle.body` itself does."""
+    response = _run(harness=FakeHarness())
+    assert response.guidance == ""
 
 
 def test_a_repos_bootstrap_cannot_displace_a_source_server_of_the_same_name(monkeypatch):
@@ -655,4 +715,39 @@ def test_a_diverged_repo_runs_with_the_reconcile_preamble(tmp_path):
     prompt = harness.calls[0].prompt
     assert "reconcile its branch" in prompt
     assert "issuebot/ISS-1" in prompt
-    assert prompt.index("reconcile its branch") < prompt.index("Task: **ISS-1**")
+    assert prompt.index("reconcile its branch") < prompt.index("Task ISS-1")
+
+
+# ---------------------------------------------------------------------------
+# The item's harness is a request, not an order (`job_for`)
+# ---------------------------------------------------------------------------
+
+
+def test_the_items_harness_is_used_silently_when_it_matches_this_install(caplog):
+    """This install's only harness is named `fake` (`wiring()`'s default). A
+    request for exactly that harness is unremarkable and logs no mismatch."""
+    job_for(work(harness="fake"), wiring())
+
+    assert "requested harness" not in caplog.text
+
+
+def test_the_items_harness_is_requested_and_falls_back_when_absent(caplog):
+    """A board asking for a harness this install has not configured (`codex`,
+    while this install runs `fake`) never fails the run over it -- it falls
+    back to the install's own default and says so once, naming both, so the
+    mismatch is diagnosable from the log rather than silently ignored."""
+    job_for(work(harness="codex"), wiring())
+
+    assert "codex" in caplog.text
+    assert "fake" in caplog.text
+
+
+def test_the_items_model_reaches_the_launch_unmatched():
+    """`WorkItem.model` is passed straight through to the harness's own
+    `LaunchSpec` -- core never validates it against anything, since only the
+    harness (and, behind it, the agent CLI) knows what a valid model is."""
+    harness = FakeHarness()
+
+    _run(_job(work=work(model="claude-opus-4-6")), harness=harness)
+
+    assert harness.calls[0].model == "claude-opus-4-6"

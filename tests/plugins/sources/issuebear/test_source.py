@@ -5,9 +5,21 @@ deliberately stays generic about.
 
 from __future__ import annotations
 
+import io
+import zipfile
+
 from conftest import FakeApi, config, connection, ctx, mention, work
 from issuebot import runner
-from issuebot.contracts import Answer, Changed, Claim, Handoff, NeedsInput, Response, SinkResult
+from issuebot.contracts import (
+    Answer,
+    Changed,
+    Claim,
+    Handoff,
+    NeedsInput,
+    Response,
+    SinkResult,
+    SkillRef,
+)
 from issuebot.plugins.sources.issuebear import messages
 from issuebot.plugins.sources.issuebear.client import AlreadyClaimed
 from issuebot.plugins.sources.issuebear.source import Issuebear
@@ -356,10 +368,8 @@ def test_an_assignment_prompt_carries_the_connections_confirm_setting():
     waits = source.prompt(item, connection(confirm=True), permits=source.permits(item))
     straight_on = source.prompt(item, connection(confirm=False), permits=source.permits(item))
 
-    assert "confirm before building: **yes**" in waits
-    assert "confirm before building: **no**" in straight_on
-    # Both plan, whatever they do about approval.
-    assert "set_plan" in waits and "set_plan" in straight_on
+    assert "confirm: yes" in waits
+    assert "confirm: no" in straight_on
 
 
 def test_a_work_prompt_names_the_agent_and_who_asked_for_the_task():
@@ -387,7 +397,6 @@ def test_a_work_prompt_renders_without_a_requester_the_board_cannot_name():
     prompt = source.prompt(item, connection(), permits=source.permits(item))
 
     assert "ISS-9" in prompt
-    assert "set_plan" in prompt
     assert "u-hetzner" in prompt
 
 
@@ -403,7 +412,7 @@ def test_a_workspace_problem_prepends_the_reconcile_preamble():
 
     prompt = source.prompt(item, connection(), permits=source.permits(item), problem=problem)
 
-    assert prompt.index("reconcile its branch") < prompt.index("Task: **ISS-9**")
+    assert prompt.index("reconcile its branch") < prompt.index("Task ISS-9")
     assert "origin/issuebot/ISS-9" in prompt
 
 
@@ -451,6 +460,39 @@ def test_the_configured_endpoint_and_credential_reach_the_agent():
 
     assert server.url == "https://configured/mcp"
     assert server.headers["Authorization"] == "Bearer pat-from-config"
+
+
+class _SkillClient(FakeApi):
+    """A board that serves real skill content rather than `FakeApi`'s default
+    empty bytes -- everything else about `download_skill` (tracking what was
+    asked for, in ``skill_downloads``) it inherits unchanged."""
+
+    def download_skill(self, skill_id: str) -> bytes:
+        self.skill_downloads.append(skill_id)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("board-planning/SKILL.md", "---\nname: board-planning\n---\nPlan well.")
+        return buf.getvalue()
+
+
+def test_agent_skills_materialises_what_the_item_carries(monkeypatch, tmp_path):
+    """The board's own skill set, fetched and unpacked into a plugin directory
+    -- `board_skills.build` does the unpacking, this source's own job is only
+    to hand it the item's refs and the client's `download_skill`."""
+    monkeypatch.setenv("HOME", str(tmp_path))  # keeps the on-disk cache out of ~/.issuebot
+    client = _SkillClient()
+    ref = SkillRef(id="s1", slug="board-planning", updated_at="v1")
+
+    bundle = _source(client).agent_skills(work(skills=(ref,)))
+
+    assert bundle.plugin_dir is not None
+    assert client.skill_downloads == ["s1"]
+
+
+def test_agent_skills_is_empty_when_the_item_carries_none():
+    """A board that selected no skills for this item gets no plugin dir --
+    the intended answer, not a degraded one."""
+    assert _source().agent_skills(work()).plugin_dir is None
 
 
 def test_the_board_server_an_agent_gets_is_the_one_the_user_registers():

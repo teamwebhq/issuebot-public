@@ -44,7 +44,14 @@ import issuebot
 from issuebot import release
 from issuebot.config import Connection
 from issuebot.context import RunnerContext
-from issuebot.contracts import Changes, Response, WorkItem, coerce_status, parse_outputs
+from issuebot.contracts import (
+    Changes,
+    Response,
+    SkillRef,
+    WorkItem,
+    coerce_status,
+    parse_outputs,
+)
 from issuebot.state import StateFile
 
 logger = logging.getLogger("issuebot")
@@ -89,6 +96,17 @@ _ENV_COMMENT_EXCERPT = "ISSUEBOT_COMMENT_EXCERPT"
 _ENV_SOURCE = "ISSUEBOT_SOURCE"
 _ENV_SOURCE_SETTINGS = "ISSUEBOT_SOURCE_SETTINGS"
 
+# The board's skills and instruction documents, as one JSON object — like
+# `_ENV_SOURCE_SETTINGS`, structured data rather than a plain string, so it
+# gets a channel of its own instead of being packed into one.
+_ENV_WORK_CONTEXT = "ISSUEBOT_WORK_CONTEXT"
+
+# The board's run preferences. Each is a plain string, so — like actor/excerpt
+# above — they ride their own variables rather than joining the JSON blob.
+_ENV_HARNESS = "ISSUEBOT_HARNESS"
+_ENV_MODEL = "ISSUEBOT_MODEL"
+_ENV_AGENT_INSTRUCTIONS = "ISSUEBOT_AGENT_INSTRUCTIONS"
+
 
 @dataclass(frozen=True)
 class WorkerEnv:
@@ -132,6 +150,19 @@ class WorkerEnv:
     actor_name: str | None = None
     comment_excerpt: str | None = None
 
+    # The board's skills and prompt documents for this item. Not on the task
+    # record either — like the mention context above, they only reach the
+    # sandbox if this value carries them.
+    skills: tuple[SkillRef, ...] = ()
+    instructions: Mapping[str, str] = field(default_factory=dict)
+
+    # The board's run preferences (see `WorkItem.harness`/`.model`) and its own
+    # instructions for the agent. Requests, not settings this module acts on —
+    # it only ever carries them through.
+    harness: str | None = None
+    model: str | None = None
+    agent_instructions: str | None = None
+
     @classmethod
     def for_run(
         cls,
@@ -155,6 +186,11 @@ class WorkerEnv:
             agent_id=agent_id,
             actor_name=work.actor_name,
             comment_excerpt=work.comment_excerpt,
+            skills=work.skills,
+            instructions=work.instructions,
+            harness=work.harness,
+            model=work.model,
+            agent_instructions=work.agent_instructions,
         )
 
     def encode(self) -> dict[str, str]:
@@ -172,9 +208,19 @@ class WorkerEnv:
             (_ENV_AGENT_ID, self.agent_id),
             (_ENV_ACTOR_NAME, self.actor_name),
             (_ENV_COMMENT_EXCERPT, self.comment_excerpt),
+            (_ENV_HARNESS, self.harness),
+            (_ENV_MODEL, self.model),
+            (_ENV_AGENT_INSTRUCTIONS, self.agent_instructions),
         ):
             if value:
                 env[key] = str(value)
+        if self.skills or self.instructions:
+            env[_ENV_WORK_CONTEXT] = json.dumps(
+                {
+                    "skills": [asdict(s) for s in self.skills],
+                    "instructions": dict(self.instructions),
+                }
+            )
         return env
 
     @classmethod
@@ -195,6 +241,8 @@ class WorkerEnv:
         except json.JSONDecodeError:
             settings = {}
 
+        skills, instructions = _decode_work_context(env.get(_ENV_WORK_CONTEXT))
+
         return cls(
             source=env.get(_ENV_SOURCE, ""),
             source_settings=settings if isinstance(settings, dict) else {},
@@ -203,6 +251,11 @@ class WorkerEnv:
             agent_id=env.get(_ENV_AGENT_ID),
             actor_name=env.get(_ENV_ACTOR_NAME),
             comment_excerpt=env.get(_ENV_COMMENT_EXCERPT),
+            skills=skills,
+            instructions=instructions,
+            harness=env.get(_ENV_HARNESS),
+            model=env.get(_ENV_MODEL),
+            agent_instructions=env.get(_ENV_AGENT_INSTRUCTIONS),
         )
 
     def work_item(self, *, task_id: str, reference: str | None, kind: str) -> WorkItem:
@@ -216,7 +269,35 @@ class WorkerEnv:
             kind="mention" if kind == "mention" else "assigned",
             actor_name=self.actor_name,
             comment_excerpt=self.comment_excerpt,
+            skills=self.skills,
+            instructions=self.instructions,
+            harness=self.harness,
+            model=self.model,
+            agent_instructions=self.agent_instructions,
         )
+
+
+def _decode_work_context(raw: str | None) -> tuple[tuple[SkillRef, ...], Mapping[str, str]]:
+    """Parse `_ENV_WORK_CONTEXT`, degrading to empty on anything unreadable.
+
+    Absent, malformed JSON, or a shape that isn't the one `encode` writes all
+    read the same way: the sandbox rebuilds what it was told and no more,
+    matching how an unreadable `_ENV_SOURCE_SETTINGS` degrades above."""
+    try:
+        context = json.loads(raw or "{}")
+        skills = tuple(
+            SkillRef(
+                id=str(s["id"]),
+                slug=str(s["slug"]),
+                name=str(s.get("name") or ""),
+                updated_at=str(s.get("updated_at") or ""),
+            )
+            for s in context.get("skills") or []
+        )
+        instructions = dict(context.get("instructions") or {})
+    except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
+        return (), {}
+    return skills, instructions
 
 
 def worker_argv(work: WorkItem, *, run_id: str, connection: Connection) -> list[str]:
@@ -276,6 +357,12 @@ class RunResult:
     changes: dict[str, Any] | None = None
     outputs: list[dict[str, Any]] = field(default_factory=list)
 
+    # `Response.guidance` -- the board's PR-writing skill, resolved inside the
+    # sandbox where the skill bundle is warm. It has to ride this wire: the
+    # controller's own delivery step runs on a different machine, with no
+    # warm cache of its own to resolve it from instead.
+    guidance: str = ""
+
     @classmethod
     def from_response(cls, response: Response) -> RunResult:
         """Wrap a response for the trip back to the controller."""
@@ -285,6 +372,7 @@ class RunResult:
             session_id=response.session_id,
             changes=asdict(response.changes) if response.changes is not None else None,
             outputs=[output.model_dump(mode="json") for output in response.outputs],
+            guidance=response.guidance,
         )
 
     def _derived_changes(self) -> Changes | None:
@@ -347,6 +435,7 @@ class RunResult:
             outputs=outputs,
             result_text=self.result_text,
             session_id=self.session_id,
+            guidance=self.guidance,
         )
 
     def to_json(self) -> str:
@@ -367,6 +456,7 @@ class RunResult:
             session_id=payload.get("session_id"),
             changes=changes if isinstance(changes, dict) else None,
             outputs=outputs if isinstance(outputs, list) else [],
+            guidance=payload.get("guidance") or "",
         )
 
     @classmethod

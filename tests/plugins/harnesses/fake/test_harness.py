@@ -68,9 +68,9 @@ def test_fake_harness_returns_configured_session_id(reporter):
 
 def test_fake_harness_summarize_records_and_returns():
     harness = FakeHarness(summary="Title line\nThe body")
-    out = harness.summarize("diff text", context="ctx", model="m", folder="/tmp/p")
+    out = harness.summarize("diff text", context="ctx", model="m", folder="/tmp/p", guidance="g")
     assert out == "Title line\nThe body"
-    assert harness.summarize_calls == [("diff text", "ctx", "m", "/tmp/p")]
+    assert harness.summarize_calls == [("diff text", "ctx", "m", "/tmp/p", "g")]
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,20 @@ WorkKind = Literal["assigned", "mention"]
 
 
 @dataclass(frozen=True)
+class SkillRef:
+    """One skill this item is worked with: what to fetch, and how to cache it.
+
+    The board sends identity and freshness, never content — the folder is
+    downloaded once per `updated_at` and reused for every task after it.
+    """
+
+    id: str
+    slug: str
+    name: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
 class WorkItem:
     """A task assigned to this agent, or a mention of it on a task.
 
@@ -69,6 +83,27 @@ class WorkItem:
     # neither is a mismatch.
     repo: str | None = None
 
+    # The skills the board says this item is worked with, in the order they
+    # should be offered. Empty means the board selected none — the runner has
+    # none of its own to fall back on, and that is the intended answer.
+    skills: tuple[SkillRef, ...] = ()
+
+    # The prompt documents this run is built from, keyed by `work_task`,
+    # `respond_task` or `respond_mention`. The board owns these outright; a
+    # missing one fails the run rather than being guessed at.
+    instructions: Mapping[str, str] = field(default_factory=dict)
+
+    # What the board would like this worked with. A request, not an order: an
+    # install that has not configured the named harness uses its own default
+    # rather than failing a run over a preference set on a machine the board
+    # cannot see.
+    harness: str | None = None
+    model: str | None = None
+
+    # The board's or column's own instructions for the agent, filled into the
+    # instruction document's {agent_instructions} tag.
+    agent_instructions: str | None = None
+
     @classmethod
     def from_api(cls, payload: dict[str, Any]) -> WorkItem:
         """Build from a work-list payload, ignoring fields we don't model."""
@@ -82,6 +117,19 @@ class WorkItem:
             actor_name=payload.get("actor_name"),
             comment_excerpt=payload.get("comment_excerpt"),
             repo=payload.get("repo"),
+            skills=tuple(
+                SkillRef(
+                    id=str(s["id"]),
+                    slug=str(s["slug"]),
+                    name=str(s.get("name") or ""),
+                    updated_at=str(s.get("updated_at") or ""),
+                )
+                for s in payload.get("skills") or []
+            ),
+            instructions=dict(payload.get("instructions") or {}),
+            harness=payload.get("harness"),
+            model=payload.get("model"),
+            agent_instructions=payload.get("agent_instructions"),
         )
 
     @property
@@ -316,6 +364,17 @@ class Response:
     session_id: str | None = None
     result_text: str = ""
 
+    # The board's PR-writing guidance, resolved once here (`run.execute`,
+    # alongside the launch itself) and carried on the response rather than
+    # looked up again wherever it is next needed. Delivery happens
+    # controller-side (`run.deliver_all`), which for a sandboxed run is a
+    # different machine from the one that ran the agent and materialised the
+    # skill bundle — so by the time a sink wants this, the cache that would
+    # answer the lookup may not even exist there. Carrying the resolved prose
+    # is what makes it work on both paths; see `sandbox_protocol.RunResult`
+    # for the wire crossing. Empty when the board sent no such skill.
+    guidance: str = ""
+
     @property
     def deliverables(self) -> list[Output]:
         """Outputs that go to sinks."""
@@ -363,6 +422,13 @@ class Delivery:
     # otherwise the branch is pushed by one actor and the pull request opened
     # by another. Empty when the source lent none.
     forge_env: Mapping[str, str] = field(default_factory=dict)
+
+    # The board's PR-writing guidance, already resolved for this run. Carried
+    # rather than looked up: a sink runs controller-side and may be on a
+    # different machine from the run (the sandboxed execution path), where the
+    # skill cache is cold. Carrying the resolved prose is what makes it work
+    # on both paths — see `Response.guidance`, where this comes from.
+    guidance: str = ""
 
 
 @dataclass(frozen=True)

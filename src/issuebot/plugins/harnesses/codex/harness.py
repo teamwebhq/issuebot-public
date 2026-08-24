@@ -70,7 +70,9 @@ class CodexHarness(Harness):
 
         return LaunchResult(exit_code=code)
 
-    def summarize(self, diff: str, *, context: str, model: str | None, folder: str) -> str:
+    def summarize(
+        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
+    ) -> str:
         """Not supported: codex has no tools-free one-shot mode wired up yet, so
         callers fall back to the mechanical PR description."""
         raise NotImplementedError("codex harness cannot generate PR descriptions yet")

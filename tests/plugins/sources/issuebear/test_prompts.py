@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from issuebot.contracts import SkillRef
 from issuebot.plugins.sources.issuebear import prompts
 from issuebot.plugins.sources.issuebear.prompts import (
     render_mention_prompt,
@@ -9,33 +12,80 @@ from issuebot.plugins.sources.issuebear.prompts import (
 )
 from issuebot.plugins.workspaces.base import WorkspaceProblem
 
+# ---------------------------------------------------------------------------
+# Rendering the board's own instruction document (Task 13)
+# ---------------------------------------------------------------------------
 
-def test_work_prompt_names_the_task_skills_and_first_move() -> None:
-    prompt = render_work_prompt(reference="ISS-42", done="review")
-    assert "ISS-42" in prompt
-    assert "review" in prompt
-    assert "board-brainstorming" in prompt
-    assert "board-implementing" in prompt
-    assert "board-planning" in prompt
-    assert "get_task" in prompt
+
+def test_the_skills_line_names_each_skill():
+    line = prompts.render_skills_line(
+        (
+            SkillRef(id="1", slug="board-planning", name="Board planning"),
+            SkillRef(id="2", slug="board-implementing", name="Board implementing"),
+        )
+    )
+    assert line == (
+        "Use your **board-planning** and **board-implementing** skills to do this well."
+    )
+
+
+def test_no_skills_renders_nothing():
+    assert prompts.render_skills_line(()) == ""
+
+
+def test_the_document_is_rendered_with_every_tag_filled():
+    """A document is authored on the board against Parade's whole eleven-tag
+    vocabulary, not against the subset any one render call happens to use —
+    so a document may reference a tag this call never explicitly supplies
+    (e.g. ``{actor_name}`` in a ``work_task`` document) and it must still
+    resolve, to "" rather than raising ``KeyError`` or surviving as literal
+    placeholder text.
+    """
+    document = "".join(f"<{tag}:{{{tag}}}>" for tag in prompts._ALL_TAGS)
+    out = prompts.render_work_prompt(
+        document=document,
+        reference="ISS-9",
+        done="review",
+        confirm=True,
+        skills=(SkillRef(id="1", slug="board-planning", name="Board planning"),),
+        agent_instructions="Run the checks.",
+    )
+    assert "<reference:ISS-9>" in out
+    assert "**board-planning**" in out
+    assert "Run the checks." in out
+    # Tags this call never mentions still resolved to "", not to a KeyError.
+    assert "<actor_name:>" in out
+    assert "<comment_excerpt:>" in out
+    assert "<self_assign_instruction:>" in out
+
+
+def test_a_missing_document_is_an_error_not_a_guess():
+    with pytest.raises(prompts.MissingDocument):
+        prompts.render_work_prompt(document="", reference="ISS-9", done="review")
+
+
+# A generic document to exercise what `render_work_prompt`/`render_mention_prompt`
+# themselves compute — confirm wording, response instructions, identity, skills —
+# as opposed to what any particular board's document happens to say. Real
+# document text is the board's business now (see `docs/superpowers` design);
+# these tests only need the plainest document that references the tag under test.
+_WORK_DOC = (
+    "Task {reference} done={done} confirm={confirm}. {confirm_instruction}\n"
+    "{identity}\n{skills}\n{agent_instructions}\n{response_instructions}"
+)
+_MENTION_DOC = (
+    "{reference} {actor_name}: {comment_excerpt}\n{self_assign_instruction}\n"
+    "{response_instructions}"
+)
 
 
 def test_work_prompt_states_done_mode() -> None:
-    prompt = render_work_prompt(reference="ISS-9", done="complete")
+    prompt = render_work_prompt(document=_WORK_DOC, reference="ISS-9", done="complete")
     assert "complete" in prompt
 
 
-def test_work_prompt_always_asks_for_a_plan() -> None:
-    """Planning is not a mode any more — both settings plan, so both prompts
-    have to say so."""
-    for confirm in (True, False):
-        prompt = render_work_prompt(reference="ISS-1", done="review", confirm=confirm)
-        assert "set_plan" in prompt
-
-
 def test_confirm_prompt_tells_the_agent_to_wait_for_approval() -> None:
-    out = render_work_prompt(reference="ISS-1", done="review", confirm=True)
-    assert "request_confirmation" in out
+    out = render_work_prompt(document=_WORK_DOC, reference="ISS-1", done="review", confirm=True)
     assert "wait" in out.lower()
 
 
@@ -43,77 +93,23 @@ def test_no_confirm_prompt_tells_the_agent_not_to_ask_routinely() -> None:
     """`confirm: no` must not read as "confirmation is unavailable" — it stays
     for the irreversible step, which is why the instruction differs rather than
     disappearing."""
-    out = render_work_prompt(reference="ISS-1", done="review", confirm=False)
-    assert "request_confirmation" in out
+    out = render_work_prompt(document=_WORK_DOC, reference="ISS-1", done="review", confirm=False)
     assert "undo" in out.lower()
 
 
-def test_work_prompt_tells_agent_not_to_do_git():
-    from issuebot.plugins.sources.issuebear.prompts import render_work_prompt
-
-    out = render_work_prompt(reference="ISS-1", done="review")
-    lowered = out.lower()
-    assert "do not" in lowered or "don't" in lowered
-    assert "branch" in lowered and "push" in lowered
-
-
-def test_render_build_prompt_mentions_the_task_and_its_confirm_setting():
-    out = render_work_prompt(reference="ISS-1", done="review", confirm=False, mode="build")
-    assert "ISS-1" in out
-    assert "confirm before building: **no**" in out
-
-
-def test_render_respond_prompt_is_read_only():
-    out = render_work_prompt(reference="ISS-9", done="review", mode="respond")
-    assert "ISS-9" in out
-    low = out.lower()
-    assert "read-only" in low
-    assert "comment" in low
-
-
-def test_render_defaults_to_build():
-    out = render_work_prompt(reference="ISS-2", done="complete")
-    assert "do not create branches" in out.lower()  # the build template's git line
-
-
-def test_the_work_prompt_asks_for_an_announcement_without_a_restatement():
-    """Both halves matter and pull against each other: silence leaves the thread
-    with no trace that the task moved, and a summary shows the reader the same
-    plan or questions twice in two shapes."""
-    out = render_work_prompt(reference="ISS-1", done="review")
-    lowered = out.lower()
-
-    # Say something.
-    assert "i've posted some questions for you" in lowered
-    # But not the contents.
-    assert "do not restate" in lowered
-    assert "never repeat" in lowered or "nothing about *what it said*" in lowered
-
-
-def test_render_build_prompt_instructs_the_asking_tool():
-    """The build prompt must tell the agent to call the board's asking tool
-    rather than guess or mark the task done when it needs human input — see
-    runner._finish_task's `paused` outcome."""
-    out = render_work_prompt(reference="ISS-1", done="review")
-    assert "ask_questions" in out
-    assert "guessing" in out.lower() or "guess" in out.lower()
-
-
-def test_the_work_prompt_asks_for_a_handoff_of_what_is_left() -> None:
-    """A run ends and its session is gone. Whatever the agent knew about the
-    work it did not finish only survives if the board holds it, so the prompt
-    has to ask for the remainder in the final comment and on the board."""
-    out = render_work_prompt(reference="ISS-1", done="review")
-    lowered = out.lower()
-
-    assert "what is left" in lowered
-    assert "checklist" in lowered
-    assert "task_graph" in out
+def test_confirm_flows_through_as_yes_or_no() -> None:
+    """The `{confirm}` tag is source.py's yes/no reading of the connection's
+    `confirm` boolean, not the boolean's Python repr."""
+    yes = render_work_prompt(document=_WORK_DOC, reference="ISS-1", done="review", confirm=True)
+    no = render_work_prompt(document=_WORK_DOC, reference="ISS-1", done="review", confirm=False)
+    assert "confirm=yes" in yes
+    assert "confirm=no" in no
 
 
 def test_render_mention_prompt_contains_all_template_fields() -> None:
     """render_mention_prompt fills in reference, actor_name, comment_excerpt, and agent_id."""
     out = render_mention_prompt(
+        document=_MENTION_DOC,
         reference="ISS-10",
         actor_name="Alice",
         comment_excerpt="Can you fix the login bug?",
@@ -126,8 +122,11 @@ def test_render_mention_prompt_contains_all_template_fields() -> None:
 
 
 def test_render_mention_prompt_handles_empty_agent_id() -> None:
-    """render_mention_prompt does not crash when agent_id is empty."""
+    """render_mention_prompt does not crash when agent_id is empty, and falls
+    back to a note that self-assignment is unavailable rather than embedding a
+    blank id."""
     out = render_mention_prompt(
+        document=_MENTION_DOC,
         reference="ISS-11",
         actor_name="Bob",
         comment_excerpt="What is the status?",
@@ -137,29 +136,7 @@ def test_render_mention_prompt_handles_empty_agent_id() -> None:
     assert "Bob" in out
     # Must not include a stale placeholder literal.
     assert "{agent_id}" not in out
-
-
-def test_render_mention_prompt_instructs_read_only_session() -> None:
-    """The mention template must clearly state the agent must not edit code."""
-    out = render_mention_prompt(
-        reference="ISS-12",
-        actor_name="Carol",
-        comment_excerpt="help?",
-        agent_id="u-1",
-    )
-    low = out.lower()
-    assert "do not" in low or "must not" in low or "cannot" in low or "don't" in low
-
-
-def test_render_mention_prompt_includes_get_task_instruction() -> None:
-    """The agent should call get_task to read the full task context."""
-    out = render_mention_prompt(
-        reference="ISS-13",
-        actor_name="Dan",
-        comment_excerpt="question here",
-        agent_id="u-1",
-    )
-    assert "get_task" in out
+    assert "could not resolve" in out.lower()
 
 
 def test_reconcile_preamble_branch_kind_instructs_local_rebase_no_push():
@@ -209,13 +186,17 @@ def test_reconcile_preamble_asks_for_a_merge_when_the_connection_merges_the_base
 
 
 def test_the_work_prompt_names_the_response_env_var():
-    out = render_work_prompt(reference="ISS-1", done="review")
+    out = render_work_prompt(document=_WORK_DOC, reference="ISS-1", done="review")
     assert "ISSUEBOT_RESPONSE" in out
 
 
 def test_the_mention_prompt_names_the_response_env_var():
     out = render_mention_prompt(
-        reference="ISS-1", actor_name="Ada", comment_excerpt="hi", agent_id="u-1"
+        document=_MENTION_DOC,
+        reference="ISS-1",
+        actor_name="Ada",
+        comment_excerpt="hi",
+        agent_id="u-1",
     )
     assert "ISSUEBOT_RESPONSE" in out
 
@@ -223,7 +204,9 @@ def test_the_mention_prompt_names_the_response_env_var():
 def test_a_run_permitted_only_an_answer_is_not_told_it_may_hand_off():
     """job.permits is the latitude, not a suggestion: a run that cannot hand off
     or edit code must not be told those kinds exist."""
-    out = render_work_prompt(reference="ISS-1", done="review", permits=frozenset({"answer"}))
+    out = render_work_prompt(
+        document=_WORK_DOC, reference="ISS-1", done="review", permits=frozenset({"answer"})
+    )
     assert '"kind": "answer"' in out
     assert '"kind": "handoff"' not in out
     assert '"kind": "changes"' not in out
@@ -231,6 +214,6 @@ def test_a_run_permitted_only_an_answer_is_not_told_it_may_hand_off():
 
 
 def test_the_default_permits_lists_all_four_kinds():
-    out = render_work_prompt(reference="ISS-1", done="review")
+    out = render_work_prompt(document=_WORK_DOC, reference="ISS-1", done="review")
     for kind in ("changes", "answer", "needs_input", "handoff"):
         assert f'"kind": "{kind}"' in out

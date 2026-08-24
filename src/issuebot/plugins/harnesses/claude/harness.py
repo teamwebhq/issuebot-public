@@ -16,7 +16,6 @@ from pathlib import Path
 from issuebot.events import AgentEvent
 from issuebot.plugins.harnesses.base import Harness, LaunchResult, LaunchSpec
 from issuebot.plugins.harnesses.claude.events import parse_stream_json_line
-from issuebot.plugins.harnesses.claude.skills import body, plugin_dir
 from issuebot.process import REAL, Process
 from issuebot.reporter import Reporter
 
@@ -27,11 +26,11 @@ logger = logging.getLogger("issuebot")
 # type; either spelling is enough to know a backoff-and-resume is worth trying.
 _RETRYABLE_MARKERS = ("overloaded", "error: 529", "status code 529", "status 529")
 
-# This call loads no plugin, so the `writing-pull-requests` skill cannot be
-# selected the usual way -- its body is inlined at {guidance} instead. The output
-# contract stays here rather than in the skill, because it is what `_describe` in
-# the GitHub sink parses back out, and it must still be stated when a broken
-# install leaves {guidance} empty.
+# This call loads no plugin, so the board's PR-writing guidance can only ever
+# reach it inlined at {guidance} (`summarize`'s own parameter, ultimately
+# `Delivery.guidance`). The output contract stays here rather than in any
+# skill, because it is what `_describe` in the GitHub sink parses back out,
+# and it must still be stated even when {guidance} is empty.
 _SUMMARY_PROMPT = (
     "Write a pull request title and description for the following change.\n"
     "Output the title on the first line, then a blank line, then a concise "
@@ -67,7 +66,7 @@ class ClaudeHarness(Harness):
         asks for in :meth:`_launch_argv`, so it is the one that can read it back."""
         return parse_stream_json_line(line)
 
-    def _launch_argv(self, spec: LaunchSpec, mcp_path: Path, plugin_root: Path) -> list[str]:
+    def _launch_argv(self, spec: LaunchSpec, mcp_path: Path) -> list[str]:
         """The full `claude -p` invocation for this launch."""
         argv = [
             self._command,
@@ -92,17 +91,11 @@ class ClaudeHarness(Harness):
             "--verbose",
         ]
 
-        # Load the bundled board-skills plugin so the agent has the board-native
-        # skills available; warn (but still launch) if it cannot be located on
-        # this install. Written into plugin_root, a subdir of this launch's own
-        # temp dir, so it is cleaned up with everything else once the process
-        # exits -- no directory left behind per launch/retry.
-        plugin = plugin_dir(plugin_root)
-        if plugin is not None:
-            argv += ["--plugin-dir", plugin]
-        else:
-            logger.warning("issuebot board-skills plugin not found; launching without it")
-
+        # Every plugin directory this launch was handed -- the repo's own
+        # bootstrap plugins, then (last, so it can only add to what came
+        # before, never displace it) the board's own skill bundle. Neither
+        # half is this harness's business to know apart; `spec.plugin_dirs`
+        # is already ordered by `run.execute`.
         for d in spec.plugin_dirs:
             argv += ["--plugin-dir", d]
 
@@ -114,6 +107,13 @@ class ClaudeHarness(Harness):
 
         if spec.disallowed_tools:
             argv += ["--disallowedTools", ",".join(spec.disallowed_tools)]
+
+        # The board's requested model, passed straight through. A request, not
+        # an order (see `WorkItem.model`): unlike the harness itself, there is
+        # nothing to fall back to here or reason to -- an unrecognised name is
+        # `claude`'s own error to raise, not core's to pre-validate.
+        if spec.model:
+            argv += ["--model", spec.model]
 
         return argv
 
@@ -127,8 +127,7 @@ class ClaudeHarness(Harness):
         with tempfile.TemporaryDirectory() as tmp:
             mcp_path = Path(tmp) / "mcp.json"
             mcp_path.write_text(json.dumps(spec.mcp_document()))
-            plugin_root = Path(tmp) / "plugin"
-            argv = self._launch_argv(spec, mcp_path, plugin_root)
+            argv = self._launch_argv(spec, mcp_path)
 
             captured: dict[str, str | None] = {"session_id": None, "result_text": None}
             retryable = {"hit": False}
@@ -167,12 +166,12 @@ class ClaudeHarness(Harness):
             result_text=captured["result_text"] or "",
         )
 
-    def summarize(self, diff: str, *, context: str, model: str | None, folder: str) -> str:
+    def summarize(
+        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
+    ) -> str:
         """Generate PR text from a diff via a tools-free, MCP-free `claude -p`.
         Runs in ``folder`` and returns the collected stdout."""
-        prompt = _SUMMARY_PROMPT.format(
-            guidance=body("writing-pull-requests"), context=context, diff=diff
-        )
+        prompt = _SUMMARY_PROMPT.format(guidance=guidance, context=context, diff=diff)
         argv = [
             self._command,
             # No prompt argument: `claude -p` reads it from stdin instead. A
