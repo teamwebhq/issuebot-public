@@ -62,7 +62,7 @@ def wire() -> WorkerEnv:
     one (`WorkerEnv.instructions`), and a worker run with none fails the
     render (`prompts.MissingDocument`) rather than launching an agent blind.
     """
-    return WorkerEnv(instructions={"work_task": "Task {reference}. {response_instructions}"})
+    return WorkerEnv(instructions={"work_task": "Task {reference}."})
 
 
 @pytest.fixture
@@ -479,7 +479,7 @@ def _run_work(conn: Connection, seen: dict) -> dict:
             task_id="t1",
             reference="ISS-1",
             repo=REPO,
-            instructions={"work_task": "Task {reference}. {response_instructions}"},
+            instructions={"work_task": "Task {reference}."},
         ),
         run_id="R1",
         ctx=ctx(),

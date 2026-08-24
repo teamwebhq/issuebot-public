@@ -50,19 +50,17 @@ from issuebot.process import REAL, Completed, Process, RecordingProcess
 # own document. Each references the tags `prompts.render_work_prompt`/
 # `render_mention_prompt` actually fill for that kind, so the fields those
 # render functions already thread through (reference, done, identity, skills,
-# agent_instructions, actor_name, comment_excerpt, self_assign_instruction,
-# response_instructions) show up in a rendered prompt the way a real board's
-# would. A test that cares what the document itself says passes its own
-# `instructions=` explicitly and this default never comes into play.
+# agent_instructions, actor_name, comment_excerpt, self_assign_instruction)
+# show up in a rendered prompt the way a real board's would. A test that
+# cares what the document itself says passes its own `instructions=`
+# explicitly and this default never comes into play.
 _STUB_INSTRUCTIONS = {
     "work_task": (
         "Task {reference} (done: {done}, confirm: {confirm}). {confirm_instruction}\n"
-        "{identity}\n{skills}\n{agent_instructions}\n{response_instructions}"
+        "{identity}\n{skills}\n{agent_instructions}"
     ),
-    "respond_task": "Task {reference} (done: {done}).\n{identity}\n{response_instructions}",
-    "respond_mention": (
-        "{actor_name} said: {comment_excerpt}\n{self_assign_instruction}\n{response_instructions}"
-    ),
+    "respond_task": "Task {reference} (done: {done}).\n{identity}",
+    "respond_mention": "{actor_name} said: {comment_excerpt}\n{self_assign_instruction}",
 }
 
 

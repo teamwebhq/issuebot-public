@@ -1,11 +1,8 @@
 """The ``issuebot connect`` wizard's workspace questions.
 
-They used to sit in the generic ``issuebot.wizard``, which spelled this
-plugin's whole vocabulary — ``git_init``, ``update_base``, the folder-against-
-clone choice — as core's own. The generic wizard now asks the installed
-workspace plugin's own hook, exactly as it asks the environment the user
-picked, so a second workspace with a strategy question of its own declares one
-by writing a file like this.
+The generic wizard asks the installed workspace plugin's own hook for these,
+exactly as it asks the environment the user picked, so a second workspace with
+a strategy question of its own declares one by writing a file like this.
 
 The hook returns the keys a saved connection carries: this plugin's own flat
 keys, plus core's ``folder``/this plugin's ``repo`` for where the working copy

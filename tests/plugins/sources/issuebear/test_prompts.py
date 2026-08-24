@@ -34,7 +34,7 @@ def test_no_skills_renders_nothing():
 
 
 def test_the_document_is_rendered_with_every_tag_filled():
-    """A document is authored on the board against Parade's whole eleven-tag
+    """A document is authored on the board against Parade's whole ten-tag
     vocabulary, not against the subset any one render call happens to use —
     so a document may reference a tag this call never explicitly supplies
     (e.g. ``{actor_name}`` in a ``work_task`` document) and it must still
@@ -71,12 +71,9 @@ def test_a_missing_document_is_an_error_not_a_guess():
 # these tests only need the plainest document that references the tag under test.
 _WORK_DOC = (
     "Task {reference} done={done} confirm={confirm}. {confirm_instruction}\n"
-    "{identity}\n{skills}\n{agent_instructions}\n{response_instructions}"
+    "{identity}\n{skills}\n{agent_instructions}"
 )
-_MENTION_DOC = (
-    "{reference} {actor_name}: {comment_excerpt}\n{self_assign_instruction}\n"
-    "{response_instructions}"
-)
+_MENTION_DOC = "{reference} {actor_name}: {comment_excerpt}\n{self_assign_instruction}"
 
 
 def test_work_prompt_states_done_mode() -> None:
@@ -217,3 +214,58 @@ def test_the_default_permits_lists_all_four_kinds():
     out = render_work_prompt(document=_WORK_DOC, reference="ISS-1", done="review")
     for kind in ("changes", "answer", "needs_input", "handoff"):
         assert f'"kind": "{kind}"' in out
+
+
+# ---------------------------------------------------------------------------
+# The response block is appended after render, not substituted into the
+# document. `render_work_prompt` renders both `work_task` and `respond_task`
+# documents (source.py picks which text to hand it), so these two documents
+# stand in for all three prompt kinds between them.
+# ---------------------------------------------------------------------------
+
+_MODERN_WORK_DOC = "Task {reference} done={done}. {agent_instructions}\nDo the work."
+_MODERN_MENTION_DOC = "{reference} {actor_name}: {comment_excerpt}\n{self_assign_instruction}"
+
+
+def test_the_response_block_is_appended_exactly_once_to_a_modern_work_prompt():
+    out = render_work_prompt(document=_MODERN_WORK_DOC, reference="ISS-1", done="review")
+    assert out.count("ISSUEBOT_RESPONSE") == 1
+    assert out.count("---") == 1
+    assert out.rstrip().endswith("never reaches the controller.")
+
+
+def test_the_response_block_is_appended_exactly_once_to_a_modern_mention_prompt():
+    out = render_mention_prompt(
+        document=_MODERN_MENTION_DOC,
+        reference="ISS-1",
+        actor_name="Ada",
+        comment_excerpt="hi",
+        agent_id="u-1",
+    )
+    assert out.count("ISSUEBOT_RESPONSE") == 1
+    assert out.count("---") == 1
+
+
+def test_permits_filtering_still_works_on_the_appended_block():
+    out = render_work_prompt(
+        document=_MODERN_WORK_DOC,
+        reference="ISS-1",
+        done="review",
+        permits=frozenset({"answer"}),
+    )
+    assert '"kind": "answer"' in out
+    assert '"kind": "handoff"' not in out
+
+
+def test_reconcile_preamble_does_not_duplicate_the_response_block():
+    """The preamble is prepended before the whole rendered prompt (which
+    already carries its own appended block), so a reconciling run must still
+    see the block exactly once."""
+    out = render_work_prompt(document=_MODERN_WORK_DOC, reference="ISS-1", done="review")
+    preambled = (
+        prompts.render_reconcile_preamble(
+            WorkspaceProblem(kind="diverged-branch", detail="d", branch="b")
+        )
+        + out
+    )
+    assert preambled.count("ISSUEBOT_RESPONSE") == 1

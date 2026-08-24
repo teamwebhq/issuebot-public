@@ -30,7 +30,6 @@ _ALL_TAGS = (
     "confirm",
     "confirm_instruction",
     "identity",
-    "response_instructions",
     "skills",
     "agent_instructions",
     "actor_name",
@@ -49,7 +48,7 @@ class MissingDocument(RuntimeError):
 
 
 def _render(document: str, **tags: str) -> str:
-    """Fill `document` with Parade's whole eleven-tag vocabulary and return it.
+    """Fill `document` with Parade's whole ten-tag vocabulary and return it.
 
     Raises :class:`MissingDocument` when `document` is blank — a board that
     sent no document for this kind of run, not a template this runner could
@@ -114,6 +113,12 @@ def render_response_instructions(permits: frozenset[OutputKind]) -> str:
         f"- {_OUTPUT_KIND_LINES[kind]}" for kind in get_args(OutputKind) if kind in permits
     )
     return _RESPONSE_BLOCK.format(env=RESPONSE_ENV, kinds=kinds)
+
+
+def _append_response_block(rendered: str, permits: frozenset[OutputKind]) -> str:
+    """Append the response-instructions block after the rendered document,
+    separated by a ``---`` line."""
+    return f"{rendered.rstrip()}\n\n---\n\n{render_response_instructions(permits)}"
 
 
 # The identity block, woven into every work prompt: who the agent is, and which
@@ -223,11 +228,9 @@ def render_work_prompt(
     """Render `document` — the board's `work_task` or `respond_task` document
     (`source.py` picks which by the connection's `mode`) — for one launch.
 
-    Raises :class:`MissingDocument` when `document` is blank. There used to be
-    a build/respond branch here to avoid handing an unused `{confirm}` to the
-    read-only document's `.format()` call; it is gone because `str.format`
-    already ignores extra keyword arguments, and now every document — whoever
-    wrote it, however it uses the vocabulary — is filled the same way.
+    Raises :class:`MissingDocument` when `document` is blank. Every document —
+    whoever wrote it, however it uses the vocabulary — is filled the same way;
+    `str.format` ignores whichever tags a particular document doesn't reference.
 
     The four identity arguments name the agent and the task's requester
     (:func:`render_identity`). They default to empty because only the source
@@ -244,17 +247,17 @@ def render_work_prompt(
     # blank lines that set it apart — and an empty block leaves none behind.
     if identity:
         identity = f"\n{identity}\n"
-    return _render(
+    rendered = _render(
         document,
         reference=reference,
         done=done,
         confirm="yes" if confirm else "no",
         confirm_instruction=_CONFIRM_INSTRUCTIONS[bool(confirm)],
         identity=identity,
-        response_instructions=render_response_instructions(permits),
         skills=render_skills_line(skills),
         agent_instructions=agent_instructions or "",
     )
+    return _append_response_block(rendered, permits)
 
 
 # Prepended to a work prompt when the task's branch diverged from origin and the
@@ -371,11 +374,11 @@ def render_mention_prompt(
         # Degraded mode: runner couldn't resolve the id, so the agent can only reply.
         self_assign_instruction = _SELF_ASSIGN_NO_ID
 
-    return _render(
+    rendered = _render(
         document,
         reference=reference,
         actor_name=actor_name,
         comment_excerpt=comment_excerpt,
         self_assign_instruction=self_assign_instruction,
-        response_instructions=render_response_instructions(permits),
     )
+    return _append_response_block(rendered, permits)

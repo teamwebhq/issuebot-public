@@ -196,9 +196,8 @@ class ClaudeHarness(Harness):
         text = "\n".join(out).strip()
 
         # An empty answer here is the caller's cue to fall back to a mechanical
-        # PR description, and that fallback used to happen in total silence.
-        # Say why it is about to happen, naming the command and the exit code,
-        # so the next one is diagnosable from the log alone.
+        # PR description. Log why it is about to happen, naming the command
+        # and the exit code, so the next one is diagnosable from the log alone.
         if code != 0 or not text:
             logger.warning(
                 "PR summary command %r exited %s and returned %s characters of text",

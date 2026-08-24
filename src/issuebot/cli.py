@@ -384,10 +384,10 @@ def render_connections(connections: Sequence[Connection]) -> str:
             if isinstance(value, bool):
                 value = "yes" if value else "no"
             lines.append(f"    {flag.lstrip('-'):<13}  {value or 'none'}")
-        # `integrate` dissolved into this: "pr" is now a sink on the connection,
-        # "push"/"commit" are git's own `push` setting, and "none" is simply
-        # an empty list — the honest default rather than a broken config. The
-        # suffix is `--sinks`' own `best-effort` qualifier, read back.
+        # "pr" is a sink on the connection; "push"/"commit" are git's own `push`
+        # setting; "none" is simply an empty list — the honest default rather
+        # than a broken config. The suffix is `--sinks`' own `best-effort`
+        # qualifier, read back.
         sinks = ", ".join(s.name if s.required else f"{s.name} (best-effort)" for s in c.sinks)
         lines.append(f"    {'sinks':<13}  {sinks or 'none'}")
     return "\n".join(lines)

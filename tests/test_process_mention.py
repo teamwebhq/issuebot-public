@@ -121,7 +121,7 @@ def test_an_item_with_no_kind_is_treated_as_assigned() -> None:
                 "task_id": "t1",
                 "reference": "ISS-1",
                 "board_id": "b",
-                "instructions": {"work_task": "Task {reference}. {response_instructions}"},
+                "instructions": {"work_task": "Task {reference}."},
             }
         )
     )
