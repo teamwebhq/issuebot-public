@@ -10,6 +10,7 @@ same run described twice, badly.
 
 from __future__ import annotations
 
+import re
 import textwrap
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,42 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from issuebot.contracts import Output
+
+
+# A commit message is a summary. Anything longer belongs in the pull request
+# body, which the sink writes separately from its own copy of the agent's
+# report, so nothing is lost by refusing to put it in the commit object too.
+MESSAGE_LIMIT = 4096
+
+# Control characters have no business in a commit object: git stores the
+# message as raw bytes and a forge parses them back, so a NUL or a stray escape
+# can make the object it built unreadable to the receiving end. Newline and tab
+# are the two a real message uses; the rest, DEL included, go.
+_STRIPPED = {c: None for c in [*range(32), 127] if c not in (9, 10)}
+
+
+def _clean(text: str) -> str:
+    """``text`` with what a commit message cannot carry taken out.
+
+    The agent writes its own summary and it goes straight into a git object
+    that is then pushed to a forge, so this is a trust boundary: the runner
+    must not be able to build a message the forge can refuse. Applied both to
+    the agent's text and to the composed message, which is the same text plus
+    our own reference.
+    """
+    # Every line ending becomes the one git reads.
+    text = text.replace("\r\n", "\n").replace("\r", "\n").translate(_STRIPPED)
+
+    if len(text) > MESSAGE_LIMIT:
+        head = text[:MESSAGE_LIMIT]
+
+        # End on a whole line where there is a line to end on; a single
+        # enormous line has no boundary to cut back to, so it keeps the cut.
+        text = head.rpartition("\n")[0] or head
+
+    # Git reads exactly one blank line as the subject/body separator, so a run
+    # of them would push the body out of every tool that honours that shape.
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def without_ref(ref: str, text: str) -> str:
@@ -71,9 +108,13 @@ def commit_message(ref: str, outputs: Iterable[Output]) -> str:
     The subject stays short for ``git log --oneline``; nothing is lost.
 
     A run that reported no ``Changed`` output falls back to the bare reference.
-    Nothing said what the commit did, so there is nothing better to write.
+    Nothing said what the commit did, so there is nothing better to write — and
+    a summary that `_clean` empties out lands in the same place, for the same
+    reason: the subject a commit must have cannot come from nothing.
     """
-    summary = next((o.summary.strip() for o in outputs if isinstance(o, Changed)), "")
+    raw = next((o.summary for o in outputs if isinstance(o, Changed)), "")
+
+    summary = _clean(raw)
     if not summary:
         return ref
 
@@ -84,4 +125,8 @@ def commit_message(ref: str, outputs: Iterable[Output]) -> str:
     # `titled` shortens by cutting the tail, so a cut subject cannot.
     body = rest if message.endswith(without_ref(ref, first)) else summary
 
-    return f"{message}\n\n{body.strip()}" if body.strip() else message
+    message = f"{message}\n\n{body.strip()}" if body.strip() else message
+
+    # Again on the whole thing: the body path above re-joins text, and the cap
+    # is a cap on the message, not on the agent's share of it.
+    return _clean(message)

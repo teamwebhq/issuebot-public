@@ -373,7 +373,13 @@ class GitHubSink(Sink):
         # purely local reason and read back as "the branch carries nothing",
         # which is the opposite of what happened.
         if not changes.pushed:
-            return SinkResult(sink=self.name, ok=False, summary="branch was not pushed to origin")
+            # The workspace knows why — git's refusal, or its own when it never
+            # asked git. This summary is what the board shows, so it is the one
+            # place that reason is any use to whoever reads the task.
+            said = f": {changes.push_detail}" if changes.push_detail else ""
+            return SinkResult(
+                sink=self.name, ok=False, summary=f"branch was not pushed to origin{said}"
+            )
 
         if not _carries_work(proc, repo, changes.base_sha, changes.head_sha):
             return SinkResult(

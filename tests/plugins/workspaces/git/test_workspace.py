@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from issuebot.plugins.workspaces.git.workspace import (
     resolve_clone_root,
     resolve_worktree_root,
 )
+from issuebot.process import REAL, Completed, Process, RecordingProcess
 from issuebot.reporter import NullReporter
 
 
@@ -636,3 +638,83 @@ def test_the_shared_clone_is_not_listed_or_offered_for_pruning(tmp_path, repo):
 
     assert clones == []  # the shared clone is not a per-task clone
     assert [wt.ref for wt in worktrees] == ["ISS-52"]  # found via the shared clone
+
+
+# ---------------------------------------------------------------------------
+# Pushing
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FlakyPush(RecordingProcess):
+    """A process adapter that refuses the first ``fail`` pushes with ``err``
+    and passes everything else to real git — the forge fumbling a push it
+    accepts moments later."""
+
+    fail: int = 0
+    err: str = ""
+    inner: Process = REAL
+    pushes: int = 0
+
+    def run(
+        self, argv: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None
+    ) -> Completed:
+        """Record the call, refuse it while pushes are still owed a failure."""
+        self.calls.append(list(argv))
+
+        if "push" in argv:
+            self.pushes += 1
+            if self.pushes <= self.fail:
+                return Completed(argv, 1, err=self.err)
+
+        return self.inner.run(argv, cwd=cwd, env=env)
+
+
+def test_a_push_the_forge_fumbles_is_retried_and_lands(tmp_path, repo):
+    """A real run committed, pushed, and lost the whole delivery to `remote:
+    fatal error in commit_refs` — GitHub's own backend, which accepted the
+    identical push by hand minutes later. An unrecognised refusal is worth
+    another try, and the branch must reach origin."""
+    _bare_origin(tmp_path, repo)
+    _git(repo, "checkout", "-b", "issuebot/ISS-1")
+    (repo / "work.txt").write_text("work\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "work")
+
+    proc = _FlakyPush(fail=1, err="remote: fatal error in commit_refs")
+    waits: list[float] = []
+
+    detail = workspace._push(Git(repo, proc), "issuebot/ISS-1", sleep=waits.append)
+
+    assert detail == ""  # nothing to explain: it landed
+    assert proc.pushes == 2
+    assert waits == [2.0]  # it backed off before asking again
+    assert _git(repo, "rev-parse", "origin/issuebot/ISS-1") == _git(repo, "rev-parse", "HEAD")
+
+
+def test_a_push_that_never_clears_says_how_hard_it_tried(tmp_path):
+    """The retry is bounded, and the task has to show that it was one: a
+    failure reported as a single refusal reads like the runner never tried."""
+    proc = _FlakyPush(fail=99, err="remote: fatal error in commit_refs")
+    waits: list[float] = []
+
+    detail = workspace._push(Git(tmp_path, proc), "issuebot/ISS-1", sleep=waits.append)
+
+    assert proc.pushes == 3
+    assert waits == [2.0, 6.0]
+    assert "commit_refs" in detail  # git's own words
+    assert "3 attempts" in detail
+
+
+def test_a_rejection_we_understand_is_not_retried(tmp_path):
+    """A protected branch says no the same way every time. Retrying a refusal
+    we can read only makes the run slower — and the reason must reach the task
+    unpadded."""
+    proc = _FlakyPush(fail=99, err="! [remote rejected] b -> b (protected branch hook declined)")
+    waits: list[float] = []
+
+    detail = workspace._push(Git(tmp_path, proc), "b", sleep=waits.append)
+
+    assert proc.pushes == 1
+    assert waits == []
+    assert detail == "! [remote rejected] b -> b (protected branch hook declined)"

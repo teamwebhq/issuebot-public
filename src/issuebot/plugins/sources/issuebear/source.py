@@ -123,7 +123,8 @@ def _run_result(connection: Connection, response: Response) -> dict[str, Any]:
 
     A branch is listed whenever the run produced commits, whether or not it
     reached origin — the board is told what the run did, and ``pushed`` says
-    separately whether the work left this machine.
+    separately whether the work left this machine. When the commits stayed
+    here, ``summary`` also gives the reason the workspace recorded.
     """
     summary = ""
     for output in response.deliverables:
@@ -138,8 +139,16 @@ def _run_result(connection: Connection, response: Response) -> dict[str, Any]:
     produced = changes is not None and not changes.empty
     pushed = bool(changes is not None and changes.pushed)
 
+    summary = (summary or response.result_text)[:_SUMMARY_LIMIT]
+
+    # Commits that never left the machine are the run's own bad news, and this
+    # report is where somebody looks next — so it says why, in one sentence,
+    # after whatever the agent had to say.
+    if produced and not pushed and changes is not None and changes.push_detail:
+        summary = f"{summary}\n\nThe branch was not pushed to origin: {changes.push_detail}"
+
     result: dict[str, Any] = {
-        "summary": (summary or response.result_text)[:_SUMMARY_LIMIT],
+        "summary": summary,
         "changed_code": produced,
         "pushed": pushed,
         "pull_requests": _pull_requests(response.sink_results),

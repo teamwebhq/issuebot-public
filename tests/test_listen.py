@@ -1724,3 +1724,24 @@ def test_work_the_listener_could_not_run_is_offered_again() -> None:
 
     assert api.claims == ["t1", "t1"]
     assert api.releases == [{"run_id": "r1", "status": "done", "note": None}]
+
+
+def test_supervisor_sends_warnings_to_stderr(tmp_path: Path, capsys: Any) -> None:
+    """A runner warning reaches the process's stderr — where journalctl and docker
+    logs pick it up — exactly once, however often the supervisor is started."""
+    import logging
+
+    from issuebot.runner import Supervisor
+
+    cfg_path = tmp_path / "config.toml"
+    save_config(_config_with([_conn("a", "b-a")]), cfg_path)
+
+    sup = Supervisor(RecordingApi(), FakeHarness(0), cfg_path, poll_interval=0.05)
+    sup.start()
+    sup.start()
+    try:
+        logging.getLogger("issuebot.test").warning("push of %s was rejected", "main")
+    finally:
+        sup.stop()
+
+    assert capsys.readouterr().err.count("push of main was rejected") == 1

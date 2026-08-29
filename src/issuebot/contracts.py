@@ -235,6 +235,13 @@ class Changes:
     files_changed: int
     pushed: bool = False
 
+    # Why the branch is not on origin, in git's own words — or the runner's
+    # when it never asked git (a connection configured not to push, a working
+    # copy with no origin). Empty when it was pushed. Carried because
+    # `pushed=False` alone tells whoever reads the board that the work is
+    # stuck, and nothing tells them what to do about it.
+    push_detail: str = ""
+
     @property
     def empty(self) -> bool:
         """True when the agent produced nothing, whatever it claims."""

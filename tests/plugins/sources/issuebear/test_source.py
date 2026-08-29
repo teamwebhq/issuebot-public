@@ -225,6 +225,23 @@ def test_a_branch_that_never_reached_origin_is_reported_as_unpushed():
     assert result["branches"] == [{"branch": "issuebot/ISS-1", "files_changed": 1}]
 
 
+def test_a_report_of_unpushed_work_says_why_the_branch_stayed_here():
+    """The run's own report is where somebody looks next, so the reason the
+    workspace recorded goes in it, after the agent's own words."""
+    api = FakeApi()
+    response = Response(
+        status="done",
+        outputs=[Changed(summary="added the endpoint")],
+        changes=_pushed(pushed=False, push_detail="! [remote rejected] protected branch hook"),
+    )
+
+    _source(api).release(Claim(work_id="t1", token="r1"), response)
+
+    (result,) = api.release_results
+    assert "added the endpoint" in result["summary"]
+    assert "protected branch hook" in result["summary"]
+
+
 def test_a_run_that_answered_reports_the_answer_and_no_code():
     api = FakeApi()
     response = Response(status="done", outputs=[Answer(text="the cache is cold on boot")])

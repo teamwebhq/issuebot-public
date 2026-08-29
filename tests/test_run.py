@@ -152,6 +152,57 @@ def test_a_summary_too_long_for_the_subject_survives_in_the_commit_body():
     assert body.strip() == summary
 
 
+def test_control_characters_never_reach_the_commit_message():
+    """The summary is the agent's own text going straight into a git object a
+    forge then parses; a message the forge can refuse must not be buildable."""
+    workspace = FakeWorkspace()
+    summary = "Add\x00 the widget\r\n\r\nIt was \x1b[31mmissing\x1b[0m."
+    harness = FakeHarness(outputs=[Changed(summary=summary)])
+
+    _run(harness=harness, workspace=workspace)
+
+    (_, message) = workspace.commit_calls[0]
+    assert message == "ISS-1: Add the widget\n\nIt was [31mmissing[0m."
+
+
+def test_a_summary_past_the_cap_is_cut_on_a_line_boundary():
+    """A commit message is a summary; the long version belongs in the pull
+    request body, which is written separately."""
+    workspace = FakeWorkspace()
+    summary = "Add the widget\n\n" + "It was missing from the gauge.\n" * 400
+    harness = FakeHarness(outputs=[Changed(summary=summary)])
+
+    _run(harness=harness, workspace=workspace)
+
+    (_, message) = workspace.commit_calls[0]
+    assert len(message) <= 4096
+    assert message.startswith("ISS-1: Add the widget\n\n")
+    assert message.endswith("It was missing from the gauge.")
+
+
+def test_a_summary_of_nothing_but_control_characters_falls_back_to_the_ref():
+    """Cleaning left no subject, and a commit must have one — the same place a
+    run that reported nothing at all lands."""
+    workspace = FakeWorkspace()
+    harness = FakeHarness(outputs=[Changed(summary="\x00\x07\r\n\x1b")])
+
+    _run(harness=harness, workspace=workspace)
+
+    assert workspace.commit_calls[0][1] == "ISS-1"
+
+
+def test_an_ordinary_summary_is_left_exactly_as_written():
+    """Sanitising must not start rewriting the messages that were fine."""
+    workspace = FakeWorkspace()
+    summary = "Add the widget\n\nIt was missing from the gauge.\n\n- gauge.py\n- test_gauge.py"
+    harness = FakeHarness(outputs=[Changed(summary=summary)])
+
+    _run(harness=harness, workspace=workspace)
+
+    (_, message) = workspace.commit_calls[0]
+    assert message == f"ISS-1: {summary}"
+
+
 def test_a_run_that_reported_no_changes_commits_under_the_bare_ref():
     """Nothing said what the commit did, so there is nothing better to write."""
     workspace = FakeWorkspace()

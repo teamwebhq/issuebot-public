@@ -347,6 +347,7 @@ def test_a_reconciled_base_rebase_still_reaches_origin(repo: Path, tmp_path: Pat
     changes = workspace.commit_and_push(prepared, "agent work", settings=Settings())
 
     assert changes.pushed is True
+    assert changes.push_detail == ""  # a branch that landed has nothing to explain
     assert _git(repo, "rev-parse", "origin/issuebot/ISS-7") == changes.head_sha
 
 
@@ -394,6 +395,47 @@ def test_a_rejected_push_says_so_in_the_log(caplog: pytest.LogCaptureFixture) ->
     logged = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
     assert "b" in logged
     assert "non-fast-forward" in logged
+
+
+def test_a_rejected_push_carries_gits_own_reason() -> None:
+    """`pushed=False` says the work is stuck, and nothing says what to do about
+    it: a protected branch, a missing credential and a bad remote all read the
+    same. Git's refusal travels with the `Changes`, which is what the board and
+    the sink's own refusal can then repeat."""
+    proc = RecordingProcess(
+        replies={
+            "refs/remotes/origin/b": completed(out="somebody-else\n"),
+            "rev-parse HEAD": completed(out="head-sha\n"),
+            "git remote": completed(out="origin\n"),
+            "push": completed(code=1, err="! [remote rejected] b -> b (protected branch hook)"),
+        }
+    )
+    prepared = Prepared(folder="/repo", branch="b", base_sha="base-sha", problem=None)
+
+    changes = GitWorkspace().commit_and_push(prepared, "work", settings=Settings(), proc=proc)
+
+    assert changes.pushed is False
+    assert "protected branch hook" in changes.push_detail
+
+
+def test_a_connection_that_never_pushes_says_so_rather_than_looking_rejected() -> None:
+    """`push = false` is a choice somebody made, not a failure — and from the
+    board the two were the same silence. Nothing is pushed either way."""
+    proc = RecordingProcess(
+        replies={
+            "rev-parse HEAD": completed(out="head-sha\n"),
+            "git remote": completed(out="origin\n"),
+        }
+    )
+    prepared = Prepared(folder="/repo", branch="b", base_sha="base-sha", problem=None)
+
+    changes = GitWorkspace().commit_and_push(
+        prepared, "work", settings=Settings(push=False), proc=proc
+    )
+
+    assert changes.pushed is False
+    assert "configured not to push" in changes.push_detail
+    assert not any("push" in c for c in proc.calls)
 
 
 def test_a_conflicted_base_update_is_reported_as_a_base_problem(repo: Path, tmp_path: Path) -> None:

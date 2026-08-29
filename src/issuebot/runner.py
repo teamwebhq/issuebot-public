@@ -68,6 +68,36 @@ from issuebot.verify import verify
 
 logger = logging.getLogger("issuebot")
 
+# The one stderr handler for this process, kept so a second Supervisor.start()
+# replaces it instead of stacking a duplicate. See _install_stderr_handler.
+_stderr_handler: logging.Handler | None = None
+
+
+def _install_stderr_handler() -> None:
+    """Send the runner's own warnings to this process's stderr.
+
+    Python only prints to stderr by itself (``logging.lastResort``) while a
+    record finds no handler at all. The first listener's ``LogTailHandler``
+    ends that, so without this handler the operator's only copy of a warning
+    is the board's telemetry tail — nothing in journalctl or docker logs.
+
+    WARNING and above only: INFO chatter (claiming, polling, retries) belongs
+    in the dashboard tail, not on an interactive ``issuebot listen`` feed. No
+    thread filter, so warnings from pool workers running concurrent tasks —
+    which the tail's per-listener thread filter drops — still get out.
+    """
+    global _stderr_handler
+
+    if _stderr_handler is not None:
+        logger.removeHandler(_stderr_handler)
+
+    # Bound to the current sys.stderr. No timestamp: the journal adds its own.
+    _stderr_handler = logging.StreamHandler()
+    _stderr_handler.setLevel(logging.WARNING)
+    _stderr_handler.setFormatter(logging.Formatter("issuebot %(levelname)s %(message)s"))
+
+    logger.addHandler(_stderr_handler)
+
 
 class _ThreadFilter(logging.Filter):
     """Pass only log records emitted from a single named thread.
@@ -1171,6 +1201,9 @@ class Supervisor:
         # per-connection: each listener attaches its own LogTailHandler (with a
         # thread-name filter) in _reconcile, so logs route to the right board.
         logging.getLogger("issuebot").setLevel(logging.INFO)
+
+        # ...and give the process itself a copy of the warnings, once.
+        _install_stderr_handler()
 
         # Resolve this machine's hostname once so it can be sent with registration.
         self._hostname = socket.gethostname()

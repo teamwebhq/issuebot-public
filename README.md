@@ -173,7 +173,10 @@ plugin checks for each connection. All checks after the PAT check are warnings.
    output commits with the task reference only.
 10. **Record changes** — issuebot gets the change data from `git`.
 11. **Push the branch** — issuebot pushes only if the branch head moved, `push`
-    is `true`, and there is an `origin` remote.
+    is `true`, and there is an `origin` remote. If the push fails for a reason
+    that issuebot does not know, it tries the push again, to a maximum of three
+    attempts. It does not try again for a reason that it knows is terminal, for
+    example a non-fast-forward or a protected branch.
 12. **Do a check of the response** — issuebot makes sure that the run permits
     each output kind. It makes sure that each output has its necessary field. It
     permits a maximum of one decision. It rejects a `changes` output if the

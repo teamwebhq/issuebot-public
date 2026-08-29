@@ -314,6 +314,16 @@ def test_refuses_an_unpushed_branch_by_saying_it_was_never_pushed() -> None:
     assert not any(c[:2] == ["gh", "api"] for c in proc.calls)
 
 
+def test_an_unpushed_branchs_refusal_repeats_the_reason_the_workspace_recorded() -> None:
+    """This summary is what reaches the board, so it is the only place git's
+    own refusal is any use to whoever has to fix it."""
+    changes = _changes(pushed=False, push_detail="! [remote rejected] protected branch hook")
+    result = GitHubSink(proc=_happy()).deliver(_delivery(changes=changes))
+    assert not result.ok
+    assert "not pushed" in result.summary
+    assert "protected branch hook" in result.summary
+
+
 # ---------------------------------------------------------------------------
 # The PR description
 # ---------------------------------------------------------------------------

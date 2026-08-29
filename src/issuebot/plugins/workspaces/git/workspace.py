@@ -40,7 +40,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal
 
@@ -885,35 +886,126 @@ def _effective_base(g: Git, prepared: Prepared) -> str:
     return r.out.strip() if r.ok and r.out.strip() else base
 
 
-def _push(g: Git, branch: str, *, rewritten: bool = False) -> bool:
-    """Push the branch to origin, returning True when it lands.
+# How much of git's rejection a `Changes.push_detail` carries. Long enough for
+# the first line or two git explains itself with, short enough for a board
+# comment to hold beside everything else the run has to say.
+_PUSH_DETAIL_LIMIT = 200
 
-    Plain and unforced on an ordinary run: a rejected push is data
-    (``Changes(pushed=False)``), not a retry. A reconciled *branch* divergence
-    fast-forwards here, so the plain push suffices for it too.
+# How many times a push is attempted, and how long it waits between attempts.
+# The run has already finished by the time we push, so a few seconds costs
+# nothing anybody is waiting on — but a listener must not hang, so the ladder
+# is short and bounded.
+_PUSH_ATTEMPTS = 3
+_PUSH_BACKOFF = (2.0, 6.0)
 
-    ``rewritten`` is the one case that may force (ADR-0013): the run started
-    with a reconcile problem and the agent's reconcile rewrote commits origin
-    already holds, so a plain push can only ever be rejected and the finished
-    work would never leave the runner. The retry is ``--force-with-lease``,
-    which refuses if origin moved since our fetch — so another contributor who
-    pushed while the agent worked is never overwritten.
+# Rejections a second attempt cannot change, matched case-insensitively against
+# git's own output. Everything *not* here is retried.
+#
+# Deliberately a denylist of terminal failures rather than an allowlist of
+# known-transient ones. A real run lost a delivery to `remote: fatal error in
+# commit_refs` — GitHub's backend failing, undocumented, and unrecognisable to
+# any allowlist; the identical push by hand minutes later landed. An allowlist
+# would have failed that case, and every future novel one, the same way. An
+# unknown failure is worth one more try; a rejection we understand is not.
+#
+# This reads git's own stderr vocabulary, which is this plugin's to know.
+# `issuebot.transient` is the same idea for the other half of the runner:
+# exception- and HTTP-status-shaped, for the poll loops.
+_TERMINAL_PUSH = (
+    "non-fast-forward",
+    "updates were rejected",
+    "fetch first",
+    "protected branch",
+    "hook declined",
+    "permission denied",
+    "authentication failed",
+    "could not read username",
+    "repository not found",
+    "does not match any",
+    "stale info",  # --force-with-lease refusing: origin moved under our fetch
+)
 
-    A rejection is logged rather than left to `Changes(pushed=False)` alone:
-    nothing else in the run says the finished branch is still only on this
-    machine, and the sink that refuses it later cannot see git's own reason."""
+
+def _push_once(g: Git, branch: str, *, rewritten: bool) -> Completed:
+    """One push attempt, returning whatever git said about it.
+
+    Plain and unforced on an ordinary run. ``rewritten`` is the one case that
+    may force (ADR-0013): the run started with a reconcile problem and the
+    agent's reconcile rewrote commits origin already holds, so a plain push can
+    only ever be rejected and the finished work would never leave the runner.
+    The force is ``--force-with-lease``, which refuses if origin moved since
+    our fetch — so another contributor who pushed while the agent worked is
+    never overwritten."""
     result = g.git("push", "-u", "origin", branch)
-    if result.ok:
-        return True
+    if result.ok or not rewritten:
+        return result
 
-    if rewritten:
-        forced = g.git("push", "--force-with-lease", "-u", "origin", branch)
-        if forced.ok:
-            return True
-        result = forced  # report the lease's refusal, not the first rejection
+    # Report the lease's refusal, not the plain push's: the lease is the one
+    # that decided.
+    return g.git("push", "--force-with-lease", "-u", "origin", branch)
+
+
+def _push(
+    g: Git,
+    branch: str,
+    *,
+    rewritten: bool = False,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Push the branch to origin, returning "" when it lands and git's own
+    reason for refusing when it does not.
+
+    Retries up to :data:`_PUSH_ATTEMPTS` times, with :data:`_PUSH_BACKOFF`
+    between them, unless git's reason is one we understand to be terminal
+    (:data:`_TERMINAL_PUSH`) — a rejected push is data
+    (``Changes(pushed=False)``), and re-asking for a refusal we can read is
+    only slower. What is *not* retried is the whole design: see
+    :data:`_TERMINAL_PUSH`.
+
+    Each retry is logged at INFO so the board tail and the journal show a push
+    that recovered rather than a silent pause; a final failure is logged at
+    WARNING as well as returned, because the log is where somebody debugging
+    the runner looks and the returned text is what reaches the board through
+    `Changes.push_detail` — a protected branch, a missing credential and a
+    connection that never pushes are one message otherwise.
+
+    ``sleep`` is injected so tests do not really wait."""
+    for attempt in range(1, _PUSH_ATTEMPTS + 1):
+        result = _push_once(g, branch, rewritten=rewritten)
+        if result.ok:
+            return ""
+
+        terminal = any(reason in result.message.lower() for reason in _TERMINAL_PUSH)
+        if terminal or attempt == _PUSH_ATTEMPTS:
+            break
+
+        logger.info(
+            "push of %s to origin failed (attempt %d of %d), retrying: %s",
+            branch,
+            attempt,
+            _PUSH_ATTEMPTS,
+            result.message,
+        )
+        sleep(_PUSH_BACKOFF[attempt - 1])
 
     logger.warning("push of %s to origin was rejected: %s", branch, result.message)
-    return False
+    return _push_detail(result.message, attempts=attempt)
+
+
+def _push_detail(message: str, *, attempts: int) -> str:
+    """What the board is told about a push that never landed.
+
+    Git's own words, cut at the last line break inside
+    :data:`_PUSH_DETAIL_LIMIT` so what the board shows ends on a whole line of
+    git's rather than mid-word. A failure we tried more than once says so, so
+    that "it tried" is visible on the task rather than only in the log."""
+    detail = message.strip()
+    if len(detail) > _PUSH_DETAIL_LIMIT:
+        head = detail[:_PUSH_DETAIL_LIMIT]
+        break_at = head.rfind("\n")
+        detail = (head[:break_at] if break_at > 0 else head).rstrip()
+
+    return f"{detail} (after {attempts} attempts)" if attempts > 1 else detail
 
 
 # ---------------------------------------------------------------------------
@@ -1071,7 +1163,18 @@ class GitWorkspace(Workspace):
         files_changed = len(names.strip().splitlines()) if names.strip() else 0
 
         pushed = False
-        if settings.push and g.has_origin():
+
+        # Why the branch stayed here, for whoever reads the task. The two
+        # cases where git is never asked say so in the runner's own words:
+        # from the board they are indistinguishable from a rejection, and the
+        # fix for each is a different one.
+        push_detail = ""
+
+        if not settings.push:
+            push_detail = "this connection is configured not to push"
+        elif not g.has_origin():
+            push_detail = "the working copy has no origin remote"
+        else:
             # A reconcile rebase can leave zero net commits (the agent's work
             # was already squash-merged upstream): HEAD then equals the
             # recomputed base, yet the branch is fully on origin. The remote
@@ -1088,7 +1191,8 @@ class GitWorkspace(Workspace):
                 # once, so nothing has to re-derive "is the recorded sha still
                 # an ancestor of HEAD".
                 rewritten = prepared.problem is not None and base_sha != prepared.base_sha
-                pushed = _push(g, prepared.branch, rewritten=rewritten)
+                push_detail = _push(g, prepared.branch, rewritten=rewritten)
+                pushed = not push_detail
 
         return Changes(
             branch=prepared.branch,
@@ -1097,4 +1201,5 @@ class GitWorkspace(Workspace):
             stat=stat,
             files_changed=files_changed,
             pushed=pushed,
+            push_detail=push_detail,
         )
