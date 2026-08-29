@@ -295,6 +295,7 @@ def test_report_telemetry_posts_body_and_auth():
                     ref="ISS-1",
                     log_tail="line1\nline2",
                     links=[{"branch": "issuebot/ISS-1"}],
+                    mode="respond",
                 )
             ],
         )
@@ -315,9 +316,34 @@ def test_report_telemetry_posts_body_and_auth():
                 "activity_phase": "working",
                 "log_tail": "line1\nline2",
                 "links": [{"branch": "issuebot/ISS-1"}],
+                # The runner's word for it, in the board's vocabulary.
+                "mode": "research",
             }
         ],
     }
+
+
+def test_a_connection_that_defers_to_the_board_reports_no_mode():
+    """There is nothing to warn a board about: this connection does whatever
+    each column asks for. Only an override is worth saying."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"status": "ok"})
+
+    client = _client(handler)
+    try:
+        client.report_telemetry(
+            version="0.1.0",
+            install_id="srv-x",
+            hostname="host-a",
+            connections=[ConnectionSnapshot(board="b-1", mode="board")],
+        )
+    finally:
+        client.close()
+
+    assert seen["body"]["connections"][0]["mode"] is None
 
 
 def test_report_telemetry_includes_install_id():

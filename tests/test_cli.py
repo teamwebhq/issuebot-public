@@ -1217,10 +1217,10 @@ def test_connect_wizard_respond_mode_survives_to_the_config(config_path: Path, t
     )
     runner = cli_runner(stub)
 
-    # name=<enter>, executor=<enter> (if asked), mode=2 (respond),
-    # confirm/done defaults, working copy=<enter> (folder), folder, then "no"
-    # to every sink. respond skips isolation and update-base.
-    user_input = f"\n{_executor_answer()}2\n\n\n\n{folder}\n" + sink_answers()
+    # name=<enter>, executor=<enter> (if asked), mode=3 (respond — 1 is board,
+    # 2 is build), confirm/done defaults, working copy=<enter> (folder), folder,
+    # then "no" to every sink. respond skips isolation and update-base.
+    user_input = f"\n{_executor_answer()}3\n\n\n\n{folder}\n" + sink_answers()
     result = runner.invoke(cli.app, ["connect"], input=user_input)
     assert result.exit_code == 0, result.output
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 from issuebot.plugins.harnesses.base import Harness, LaunchResult, LaunchSpec
@@ -71,8 +72,15 @@ class CodexHarness(Harness):
         return LaunchResult(exit_code=code)
 
     def summarize(
-        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
+        self,
+        *,
+        context: str,
+        change: str,
+        model: str | None,
+        folder: str,
+        guidance: str = "",
+        env: Mapping[str, str] | None = None,
     ) -> str:
-        """Not supported: codex has no tools-free one-shot mode wired up yet, so
+        """Not supported: codex has no read-only one-shot mode wired up yet, so
         callers fall back to the mechanical PR description."""
         raise NotImplementedError("codex harness cannot generate PR descriptions yet")

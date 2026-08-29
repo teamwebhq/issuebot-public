@@ -1,4 +1,4 @@
-"""The GitHub sink: opens (or reuses) a PR from a pushed branch.
+"""The GitHub sink: opens (or updates) a PR from a pushed branch.
 
 ``deliver`` verifies against the forge itself before opening anything —
 verification lives in two places: the controller's own check
@@ -20,10 +20,17 @@ configured repo URL, else the ``origin`` of a checkout it does keep) but what
 comes out is one value feeding one code path — a connection with a checkout and
 one without take exactly the same route through this module.
 
-Opening a PR — and the diff-driven PR-description generation (``_describe``,
+Opening a PR — and the PR-description generation (``_describe``,
 ``harness.summarize``) that writes its body — is this sink's own business, not
 the workspace's or the run pipeline's (ADR-0012). A connection with no github
 sink never pays for a description.
+
+**Every run rewrites the whole description.** A second run on the same branch
+does not append to the pull request it finds; it describes the pull request as
+it now stands and replaces the title and the body with that. The alternative —
+keeping the first run's text — leaves the description telling a reviewer about
+half the work in front of them. The cost is that an edit a person made to the
+body does not survive the next run, so put such notes in a review comment.
 """
 
 from __future__ import annotations
@@ -32,57 +39,24 @@ import json
 import logging
 import re
 import tempfile
-import textwrap
 from typing import TYPE_CHECKING, ClassVar
 
 from issuebot.contracts import Changed, SinkResult
 from issuebot.plugins.sinks.base import Sink
 from issuebot.process import REAL, Process, with_env
+from issuebot.summaries import titled
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from issuebot.contracts import Changes, Delivery, OutputKind
     from issuebot.plugins.harnesses.base import Harness
 
 logger = logging.getLogger("issuebot")
 
-# A diff too large to hand a summarizer model is truncated rather than sent
-# whole. ~200KB is about 50k tokens, which every summarizer model this sink can
-# use reads comfortably — a cut diff makes the model write about half a change,
-# so the cap sits well above the diff of an ordinary task.
-_MAX_DIFF_BYTES = 200_000
-
 # Everything up to and including the host, in the two forms git writes a remote:
 # `scheme://[user@]host/` and `user@host:`. What follows is the repository path.
 _HOST = re.compile(r"^(?:[a-z][a-z0-9+.-]*://[^/]+/|[^/@]+@[^:/]+:)", re.IGNORECASE)
-
-
-def _capped(text: str, limit: int = _MAX_DIFF_BYTES) -> str:
-    """Truncate a diff too large to hand to a model, marking the cut."""
-    return text if len(text) <= limit else text[:limit] + "\n…(diff truncated)…"
-
-
-def _titled(ref: str, title: str) -> str:
-    """``"{ref}: {title}"``, with a ref the writer already put in front removed.
-
-    Both paths into a PR title route through here. The model is told not to
-    prefix the ref and slips anyway, and the mechanical path's text is the
-    agent's own summary, whose first line normally *does* start with the ref —
-    so prefixing unconditionally gives the reviewer ``ISS-42: ISS-42: …``. One
-    helper on both paths means that cannot happen on either.
-    """
-    text = title.strip()
-    if text.lower().startswith(ref.lower()):
-        # Drop the ref, then whatever separated it from the real title.
-        text = text[len(ref) :].lstrip(":- \t")
-
-    # Cap what is left, not the raw line: capping first spends the budget on a
-    # ref that is about to be stripped, so the title lost its tail for nothing
-    # ("…closes any live agen"). `shorten` cuts back to a whole word.
-    budget = 72 - len(ref) - len(": ")
-    if budget > 0 and len(text) > budget:
-        text = textwrap.shorten(text, width=budget, placeholder="")
-
-    return f"{ref}: {text}"
 
 
 def _slug(url: str) -> str:
@@ -144,38 +118,6 @@ def _carries_work(proc: Process, repo: str, base_sha: str, head_sha: str) -> boo
     return bool(payload.get("ahead_by"))
 
 
-def _diff(proc: Process, repo: str, changes: Changes, folder: str) -> str:
-    """The unified diff between ``changes``' base and head, or ``""``.
-
-    A ladder: the local checkout's ``git diff`` when this connection keeps one
-    (no network), else GitHub's own compare endpoint — the same endpoint
-    :func:`_carries_work` asks, only with the diff media type, which makes it
-    answer with a unified diff instead of JSON. Empty when neither can answer,
-    which is what a caller with no repository and no checkout gets.
-
-    A clone-based or sandboxed connection keeps no checkout on this machine, and
-    the diff is the only part of the PR description that ever needed one — so it
-    is fetched rather than read, and such a connection gets the same
-    model-written description a local one gets.
-    """
-    if folder:
-        return proc.run(["git", "diff", f"{changes.base_sha}...{changes.head_sha}"], cwd=folder).out
-
-    if not repo:
-        return ""
-
-    result = proc.run(
-        [
-            "gh",
-            "api",
-            "-H",
-            "Accept: application/vnd.github.v3.diff",
-            f"repos/{repo}/compare/{changes.base_sha}...{changes.head_sha}",
-        ]
-    )
-    return result.out if result.ok else ""
-
-
 def _signed(body: str, delivery: Delivery) -> str:
     """The PR body, with the clanker that did the work named at the foot of it.
 
@@ -188,13 +130,17 @@ def _signed(body: str, delivery: Delivery) -> str:
     return f"{body}\n\n---\n\nOpened by **{author}**." if author else body
 
 
-def _open_pr(proc: Process, repo: str, branch: str, body: str, *, title: str) -> str | None:
-    """The branch's open PR url, opening one if there isn't already one.
+def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str] | None:
+    """The branch's open pull request as ``(number, url)``, or ``None``.
 
     Scoped with ``pr list --state open`` rather than ``pr view <branch>``: the
     latter also matches a closed or merged PR, so a reused branch would report
     a stale PR from earlier work as this run's. Names the repo explicitly
-    rather than relying on a cwd."""
+    rather than relying on a cwd.
+
+    The number is kept beside the url because a second run rewrites the pull
+    request it finds, and ``gh pr edit`` is addressed by number.
+    """
     argv = [
         "gh",
         "pr",
@@ -206,43 +152,107 @@ def _open_pr(proc: Process, repo: str, branch: str, body: str, *, title: str) ->
         "--state",
         "open",
         "--json",
-        "url",
-        "-q",
-        ".[0].url",
+        "number,url",
     ]
-    existing = proc.run(argv)
-    if existing.ok and existing.out.strip():
-        return existing.out.strip()
+    result = proc.run(argv)
+    if not result.ok:
+        return None
 
+    # An empty list, a body that is not JSON, a row missing either field: all
+    # of them mean the same thing here — nothing open to write to.
+    try:
+        row = json.loads(result.out)[0]
+        return int(row["number"]), str(row["url"])
+    except (json.JSONDecodeError, TypeError, KeyError, IndexError, ValueError):
+        return None
+
+
+def _change(repo: str, folder: str, changes: Changes, number: int | None) -> str:
+    """Prose telling the summarizer where the change it must describe is.
+
+    Handed to the harness whole: the harness carries it into its prompt and
+    never reads it, so knowing how a GitHub change is looked at stays here with
+    the rest of this sink's forge knowledge.
+
+    An existing pull request is described from the *whole* pull request, not
+    from this run's slice of it. On a second run ``changes.base_sha`` is the
+    first run's tip, so the range below would describe only the increment while
+    the reviewer reads the lot.
+
+    A checkout answers without the network; a clone-based or sandboxed
+    connection keeps none on this machine, so it is named a ``gh`` command
+    instead and gets the same model-written description.
+    """
+    if number is not None:
+        commands = [f"`gh pr diff {number} -R {repo}`"]
+        if folder:
+            commands.append(f"`git log {changes.branch}` in the current directory")
+        return (
+            f"The change is the whole of pull request #{number} of `{repo}`, "
+            f"which this run has just added commits to. Read it with "
+            f"{' and '.join(commands)}."
+        )
+
+    span = f"{changes.base_sha}...{changes.head_sha}"
+    if folder:
+        return (
+            f"The change is the git range `{span}` in the current directory. "
+            f"Read it with `git diff {span}`, `git log {span}` and `git show`."
+        )
+
+    return (
+        f"The change is the git range `{span}` of `{repo}`. Read it with "
+        f'`gh api -H "Accept: application/vnd.github.v3.diff" '
+        f"repos/{repo}/compare/{span}`."
+    )
+
+
+def _create_pr(proc: Process, repo: str, branch: str, body: str, *, title: str) -> str | None:
+    """Open a pull request from ``branch`` and return its url, or ``None``."""
     created = proc.run(
         ["gh", "pr", "create", "-R", repo, "--head", branch, "--title", title, "--body", body]
     )
     return created.out.strip() or None if created.ok else None
 
 
+def _rewrite_pr(proc: Process, repo: str, number: int, body: str, *, title: str) -> bool:
+    """Replace pull request ``number``'s title and body. True when it took.
+
+    The whole description, not an addition to it — see this module's docstring
+    for why, and for what that costs a person who edited the body by hand.
+    """
+    edited = proc.run(
+        ["gh", "pr", "edit", str(number), "-R", repo, "--title", title, "--body", body]
+    )
+    return edited.ok
+
+
 def _describe(
-    proc: Process,
-    repo: str,
     folder: str,
     changes: Changes,
     summary: str,
     *,
+    change: str,
     harness: Harness | None,
     model: str | None,
     guidance: str,
     ref: str,
+    env: Mapping[str, str],
 ) -> tuple[str, str, str]:
-    """The PR ``(title, body, fallback_reason)``: ask the harness to turn the
-    diff into one, falling back to the agent's own change summary (plus
-    ``git diff --stat``) when there is no harness, no diff to read, the call
-    fails, or it comes back empty — the same fallback ladder the old
-    ``local_run._describe`` used, just built from ``Changes``/the agent's own
-    ``summary`` output instead of a board fetch, since a sink has no source of
-    its own to ask for a task's title.
+    """The PR ``(title, body, fallback_reason)``: ask the harness to read the
+    change ``change`` names and write one, falling back to the agent's own
+    change summary (plus ``git diff --stat``) when there is no harness, the
+    call fails, or it comes back empty.
+
+    The harness is told where to look rather than handed a diff: a change too
+    large for one prompt used to be described from a truncated copy of itself,
+    which is how a big pull request got a description of half of it.
 
     ``guidance`` is ``Delivery.guidance`` (the board's own PR-writing skill,
     already resolved), forwarded to the harness untouched — this function does
-    not read it itself, only carries it to where it is used.
+    not read it itself, only carries it to where it is used. ``env`` is the
+    run's forge credentials, carried the same way, so a ``gh`` call the agent
+    makes while reading authenticates as whoever pushed the branch.
 
     ``fallback_reason`` is empty when the model wrote the description and a
     short phrase naming the rung that was taken when it did not. The caller puts
@@ -252,47 +262,40 @@ def _describe(
     reason = "no summarizer harness configured"
 
     if harness is not None:
-        diff = _capped(_diff(proc, repo, changes, folder))
+        try:
+            # `summarize` runs a child process, so it needs a cwd that exists.
+            # A connection with no checkout has none — a scratch directory
+            # keeps the child out of whatever directory the listener itself
+            # happens to be sitting in.
+            with tempfile.TemporaryDirectory() as scratch:
+                text = harness.summarize(
+                    context=summary,
+                    change=change,
+                    model=model,
+                    folder=folder or scratch,
+                    guidance=guidance,
+                    env=env,
+                ).strip()
 
-        if not diff.strip():
-            reason = "no diff available"
-            logger.warning("no diff available for %s; using a mechanical description", ref)
+        except Exception as exc:  # noqa: BLE001 - a summarizer failure falls back, never fails the PR
+            reason = f"summarizer failed ({type(exc).__name__})"
+            logger.warning(
+                "PR summary generation failed for %s; using a mechanical description",
+                ref,
+                exc_info=True,
+            )
 
         else:
-            try:
-                # `summarize` runs a child process, so it needs a cwd that
-                # exists. A connection with no checkout has none — a scratch
-                # directory keeps the child out of whatever directory the
-                # listener itself happens to be sitting in.
-                with tempfile.TemporaryDirectory() as scratch:
-                    text = harness.summarize(
-                        diff,
-                        context=summary,
-                        model=model,
-                        folder=folder or scratch,
-                        guidance=guidance,
-                    ).strip()
+            title, _, body = text.partition("\n")
+            if title.strip():
+                return titled(ref, title), (body.strip() or summary), ""
 
-            except Exception as exc:  # noqa: BLE001 - a summarizer failure falls back, never fails the PR
-                reason = f"summarizer failed ({type(exc).__name__})"
-                logger.warning(
-                    "PR summary generation failed for %s; using a mechanical description",
-                    ref,
-                    exc_info=True,
-                )
-
-            else:
-                title, _, body = text.partition("\n")
-                if title.strip():
-                    return _titled(ref, title), (body.strip() or summary), ""
-
-                # The call worked but gave back nothing usable. The mechanical
-                # description below still opens the PR; it must not do so
-                # silently.
-                reason = "summary came back unusable"
-                logger.warning(
-                    "PR summary for %s came back unusable; using a mechanical description", ref
-                )
+            # The call worked but gave back nothing usable. The mechanical
+            # description below still opens the PR; it must not do so silently.
+            reason = "summary came back unusable"
+            logger.warning(
+                "PR summary for %s came back unusable; using a mechanical description", ref
+            )
 
     mechanical_title = summary.strip().splitlines()[0] if summary.strip() else ref
 
@@ -302,7 +305,7 @@ def _describe(
     parts = [summary.strip(), f"## Changes\n\n```\n{stat}\n```" if stat else ""]
     mechanical_body = "\n\n".join(filter(None, parts))
 
-    return _titled(ref, mechanical_title), (mechanical_body or summary), reason
+    return titled(ref, mechanical_title), (mechanical_body or summary), reason
 
 
 class GitHubSink(Sink):
@@ -335,7 +338,8 @@ class GitHubSink(Sink):
         self._proc = proc
 
     def deliver(self, delivery: Delivery) -> SinkResult:
-        """Open (or reuse) a PR from ``delivery.changes``' pushed branch.
+        """Open a PR from ``delivery.changes``' pushed branch, or rewrite the
+        description of the one that branch already has.
 
         Refuses before making any GitHub call that isn't the verification
         itself: no ``Changes`` at all, no repository it can name, a branch that
@@ -376,23 +380,46 @@ class GitHubSink(Sink):
                 sink=self.name, ok=False, summary="branch carries no verified changes"
             )
 
+        # The pull request being written to is found before anything is
+        # written, because what the description describes depends on it: a
+        # branch with no PR yet is the whole change, while a branch that has
+        # one is described from the whole of that PR.
+        existing = _existing_pr(proc, repo, changes.branch)
+
         title, body, fallback = _describe(
-            proc,
-            repo,
             delivery.folder,
             changes,
             delivery.output.summary,
+            change=_change(repo, delivery.folder, changes, existing[0] if existing else None),
             harness=self._harness,
             model=self._summary_model,
             guidance=delivery.guidance,
             ref=delivery.work.ref,
+            env=delivery.forge_env,
         )
-        url = _open_pr(proc, repo, changes.branch, _signed(body, delivery), title=title)
-        if url is None:
-            return SinkResult(sink=self.name, ok=False, summary="could not open a pull request")
+        signed = _signed(body, delivery)
 
-        # A mechanical description says so where the person reading the task
-        # comment will see it, not only in the runner's log.
-        note = f"opened PR (mechanical description: {fallback})" if fallback else "opened PR"
+        notes = [f"mechanical description: {fallback}"] if fallback else []
+
+        if existing is None:
+            url = _create_pr(proc, repo, changes.branch, signed, title=title)
+            if url is None:
+                return SinkResult(sink=self.name, ok=False, summary="could not open a pull request")
+            verb = "opened PR"
+
+        else:
+            number, url = existing
+            # A failed rewrite is not a failed delivery: the branch is pushed
+            # and the pull request is there to read. It is reported, not
+            # raised, so the reviewer knows the description is the older one.
+            if _rewrite_pr(proc, repo, number, signed, title=title):
+                verb = "updated PR"
+            else:
+                verb = "reused PR"
+                notes.append("description not updated")
+
+        # A mechanical or unwritten description says so where the person
+        # reading the task comment will see it, not only in the runner's log.
+        note = f"{verb} ({'; '.join(notes)})" if notes else verb
 
         return SinkResult(sink=self.name, ok=True, summary=note, url=url)

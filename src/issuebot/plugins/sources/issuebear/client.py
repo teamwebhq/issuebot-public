@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from issuebot.plugins.sources.base import ConnectionConflict
+from issuebot.plugins.sources.issuebear.settings import WIRE_MODES
 
 if TYPE_CHECKING:
     from issuebot.agent_state import ConnectionSnapshot
@@ -232,19 +233,29 @@ class IssuebotClient:
         return self._json(self._http.post(f"/me/work/mentions/{notification_id}/claim"))
 
     def claim(
-        self, task_id: str, *, install_id: str | None = None, executor: str | None = None
+        self,
+        task_id: str,
+        *,
+        install_id: str | None = None,
+        executor: str | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """Claim ``task_id`` for this agent, returning ``{run_id, task_id}``.
 
         Optionally reports the owning install and executor kind so cloud runs
-        are observable on the board. Raises :class:`AlreadyClaimed` if another
-        listener already won it.
+        are observable on the board, and ``mode`` — what this run will actually
+        do, in the board's own words — so the board can say so rather than
+        leaving somebody to guess. Nothing on either side branches on it.
+
+        Raises :class:`AlreadyClaimed` if another listener already won it.
         """
         body: dict[str, str] = {}
         if install_id:
             body["install_id"] = install_id
         if executor:
             body["executor"] = executor
+        if mode:
+            body["mode"] = mode
         resp = self._http.post(f"/tasks/{task_id}/claim", json=body or None)
         if resp.status_code == 409:
             raise AlreadyClaimed(task_id)
@@ -301,14 +312,28 @@ class IssuebotClient:
         """Send a liveness heartbeat for the given agent run."""
         self._json(self._http.post(f"/agent-runs/{run_id}/heartbeat"))
 
-    def release(self, run_id: str, *, status: str = "done", note: str | None = None) -> None:
-        """Release the agent run, reporting ``status`` and an optional ``note``."""
-        self._json(
-            self._http.post(
-                f"/agent-runs/{run_id}/release",
-                json={"status": status, "note": note},
-            )
-        )
+    def release(
+        self,
+        run_id: str,
+        *,
+        status: str = "done",
+        note: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        """Release the agent run, reporting ``status``, an optional ``note`` and
+        an optional ``result``.
+
+        ``result`` is what the run did — its summary, whether it changed and
+        pushed code, the branch and the pull requests — which the board shows
+        on the task and reads as a column's exit condition. It is left out of
+        the body entirely when there is none, so the board sees exactly the
+        request an older runner sends.
+        """
+        body: dict[str, Any] = {"status": status, "note": note}
+        if result is not None:
+            body["result"] = result
+
+        self._json(self._http.post(f"/agent-runs/{run_id}/release", json=body))
 
     # --- telemetry + commands (clanker dashboard) ----------------------------
 
@@ -323,9 +348,14 @@ class IssuebotClient:
         """Report this install's live per-connection state to the dashboard.
 
         Translation happens here: the runner's snapshot vocabulary (``board``,
-        ``phase``) becomes this board's wire schema (``board_id``,
-        ``activity_phase``) — spelled only in this client, exactly like the
-        sandbox lifecycle columns above.
+        ``phase``, ``mode``) becomes this board's wire schema (``board_id``,
+        ``activity_phase``, and the board's own mode words) — spelled only in
+        this client, exactly like the sandbox lifecycle columns above.
+
+        A connection that defers to the board reports no mode at all: it has
+        nothing to warn a board about, because it does whatever each column
+        asks for. Only an override — this connection always builds, or always
+        responds, whatever the column wanted — is worth saying.
         """
         self._json(
             self._http.post(
@@ -340,6 +370,7 @@ class IssuebotClient:
                             "activity_phase": s.phase,
                             "log_tail": s.log_tail,
                             "links": s.links,
+                            "mode": WIRE_MODES.get(s.mode),
                         }
                         for s in connections
                     ],

@@ -32,6 +32,12 @@ class ConnectionSnapshot:
     board: str = ""
     target: str = ""
 
+    # What this connection does with its board's work, in the runner's own
+    # words. Identity like the three above — a setting, not live state — and
+    # opaque here: core carries the string, and the source's client is what
+    # translates it into whatever its server calls the same thing.
+    mode: str = ""
+
     # Live state — read from the ConnectionState under its lock.
     phase: str = "idle"
     ref: str | None = None
@@ -86,7 +92,9 @@ class ConnectionState:
 
     # -- reading ------------------------------------------------------------
 
-    def snapshot(self, *, name: str = "", board: str = "", target: str = "") -> ConnectionSnapshot:
+    def snapshot(
+        self, *, name: str = "", board: str = "", target: str = "", mode: str = ""
+    ) -> ConnectionSnapshot:
         """A consistent :class:`ConnectionSnapshot` of the live state.
 
         The identity fields are the caller's to stamp — the listener knows its
@@ -98,6 +106,7 @@ class ConnectionState:
                 name=name,
                 board=board,
                 target=target,
+                mode=mode,
                 phase=self._phase,
                 ref=self._ref,
                 log_tail="\n".join(self._log_tail),

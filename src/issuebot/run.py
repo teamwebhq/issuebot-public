@@ -44,6 +44,7 @@ from issuebot.plugins.harnesses.base import Harness, LaunchResult, LaunchSpec
 from issuebot.plugins.workspaces.base import Prepared, Workspace
 from issuebot.process import REAL, Process, with_env
 from issuebot.reporter import ConsoleReporter, Reporter
+from issuebot.summaries import commit_message
 from issuebot.transient import describe_transient, is_transient
 
 if TYPE_CHECKING:
@@ -322,7 +323,11 @@ def _finish(
         )
 
     try:
-        changes = workspace.commit_and_push(prepared, job.work.ref, settings=settings, proc=proc)
+        # The commit says what the run did, in the agent's own words: `outputs`
+        # is already in hand, and the bare ref alone made every commit in a
+        # repository read the same.
+        message = commit_message(job.work.ref, outputs)
+        changes = workspace.commit_and_push(prepared, message, settings=settings, proc=proc)
     except Exception:  # noqa: BLE001 - surface any commit/push failure
         logger.exception("commit/push failed for %s", job.work.ref)
         return Response(

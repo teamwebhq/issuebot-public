@@ -77,6 +77,8 @@ def work(
     instructions: dict[str, str] | None = None,
     harness: str | None = None,
     model: str | None = None,
+    prompt: str | None = None,
+    mode: str | None = None,
     agent_instructions: str | None = None,
 ) -> WorkItem:
     """A work item, with the fields a test cares about and defaults for the rest.
@@ -99,6 +101,8 @@ def work(
         instructions=_STUB_INSTRUCTIONS if instructions is None else instructions,
         harness=harness,
         model=model,
+        prompt=prompt,
+        mode=mode,
         agent_instructions=agent_instructions,
     )
 
@@ -357,6 +361,10 @@ class FakeApi:
         self.claims: list[str] = []
         self.claim_kwargs: list[dict[str, Any]] = []
         self.releases: list[dict[str, Any]] = []
+        # What each release reported the run did, kept beside `releases` rather
+        # than in it: every test that asserts on a release is asserting how it
+        # ended, and only the few about the report itself want this.
+        self.release_results: list[dict[str, Any] | None] = []
         self.comments: list[tuple[str, str]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.heartbeats: list[str] = []
@@ -418,8 +426,16 @@ class FakeApi:
     def heartbeat(self, run_id: str) -> None:
         self.heartbeats.append(run_id)
 
-    def release(self, run_id: str, *, status: str = "done", note: str | None = None) -> None:
+    def release(
+        self,
+        run_id: str,
+        *,
+        status: str = "done",
+        note: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> None:
         self.releases.append({"run_id": run_id, "status": status, "note": note})
+        self.release_results.append(result)
         self.calls.append(("release", status))
         self.released.set()
 

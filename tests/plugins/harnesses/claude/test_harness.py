@@ -282,11 +282,14 @@ def test_result_text_captured_from_result_event(reporter):
     assert res.result_text == "I investigated and found X."
 
 
-def test_summarize_builds_toolless_argv_and_returns_text():
+def test_summarize_builds_a_read_only_argv_and_returns_text():
     spawn = SpawnRecorder(lines=["Add widget", "Implements the widget per ISS-1."])
     harness = ClaudeHarness(command="claude", proc=spawn)
     out = harness.summarize(
-        "DIFF", context="ISS-1: Add widget", model="claude-haiku-4-5", folder="/repo"
+        change="Read `git diff a...b`.",
+        context="ISS-1: Add widget",
+        model="claude-haiku-4-5",
+        folder="/repo",
     )
     assert out == "Add widget\nImplements the widget per ISS-1."
     argv = spawn.argv
@@ -295,26 +298,63 @@ def test_summarize_builds_toolless_argv_and_returns_text():
     assert spawn.cwd == "/repo"
 
 
-def test_summarize_sends_the_prompt_on_stdin_not_the_command_line():
-    """A diff-carrying prompt is far larger than a single argv entry may be, so
-    it travels on stdin; putting it in argv fails the exec entirely."""
+def test_summarize_may_read_the_change_but_never_write():
+    """The call has to look at the repository, so it gets tools — an allow-list
+    of readers. Skipping permissions instead would hand a description-writing
+    call write access to somebody's checkout; a denied tool only costs it the
+    written description."""
     spawn = SpawnRecorder(lines=["Add widget", "body"])
     harness = ClaudeHarness(command="claude", proc=spawn)
-    big = "+" * 200_000
-    harness.summarize(big, context="ISS-1", model=None, folder="/repo")
+    harness.summarize(change="Read `git diff a...b`.", context="ISS-1", model=None, folder="/repo")
 
-    assert big in (spawn.stdin or "")
-    assert all(big not in arg for arg in spawn.argv)
+    argv = spawn.argv
+    assert "--dangerously-skip-permissions" not in argv
+    allowed = argv[argv.index("--allowedTools") + 1].split(",")
+    assert "Read" in allowed
+    assert "Bash(git diff:*)" in allowed
+    assert all("Write" not in tool and "Edit" not in tool for tool in allowed)
+
+
+def test_summarize_is_told_where_the_change_is_rather_than_handed_it():
+    """The whole point of the read-only tools: a change larger than one prompt
+    is described from all of itself, so what travels is where to look."""
+    spawn = SpawnRecorder(lines=["Add widget", "body"])
+    harness = ClaudeHarness(command="claude", proc=spawn)
+    harness.summarize(
+        change="Read `gh pr diff 7 -R o/r`.", context="ISS-1", model=None, folder="/repo"
+    )
+
+    assert "gh pr diff 7 -R o/r" in (spawn.stdin or "")
+
+
+def test_summarize_carries_the_runs_forge_credentials():
+    """The agent reads the change with `gh`, which must authenticate as the same
+    identity that pushed the branch."""
+    spawn = SpawnRecorder(lines=["Add widget", "body"])
+    harness = ClaudeHarness(command="claude", proc=spawn)
+    harness.summarize(
+        change="Read `gh pr diff 7 -R o/r`.",
+        context="ISS-1",
+        model=None,
+        folder="/repo",
+        env={"GH_TOKEN": "t"},
+    )
+
+    assert spawn.envs[-1] == {"GH_TOKEN": "t"}
 
 
 def test_summarize_weaves_the_boards_guidance_into_the_prompt():
     """`guidance` is `Delivery.guidance` -- the board's own `writing-pull-requests`
-    skill, already resolved -- and reaches this tools-free call the only way it
+    skill, already resolved -- and reaches this plugin-free call the only way it
     can: inlined into the prompt on stdin."""
     spawn = SpawnRecorder(lines=["Add widget", "body"])
     harness = ClaudeHarness(command="claude", proc=spawn)
     harness.summarize(
-        "DIFF", context="ISS-1", model=None, folder="/repo", guidance="Title in the imperative."
+        change="Read `git diff a...b`.",
+        context="ISS-1",
+        model=None,
+        folder="/repo",
+        guidance="Title in the imperative.",
     )
 
     assert "Title in the imperative." in (spawn.stdin or "")

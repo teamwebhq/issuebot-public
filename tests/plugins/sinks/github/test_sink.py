@@ -1,4 +1,4 @@
-"""Tests for the GitHub sink: opening (or reusing) a PR from a pushed branch."""
+"""Tests for the GitHub sink: opening (or updating) a PR from a pushed branch."""
 
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ def _delivery(
     folder: str = "/repo",
     ref: str = "ISS-1",
     guidance: str = "",
+    forge_env: dict[str, str] | None = None,
 ) -> Delivery:
     return Delivery(
         work=work(reference=ref),
@@ -47,6 +48,7 @@ def _delivery(
         repo=repo,
         guidance=guidance,
         folder=folder,
+        forge_env=forge_env or {},
     )
 
 
@@ -60,7 +62,7 @@ def _happy(**replies: object) -> RecordingProcess:
     scripted: dict[str, object] = dict(replies)
     for pattern, reply in {
         "gh api": completed(out='{"ahead_by": 3}'),
-        "gh pr list": completed(out=""),
+        "gh pr list": completed(out="[]"),
         "gh pr create": completed(out="https://github.com/o/r/pull/9\n"),
     }.items():
         scripted.setdefault(pattern, reply)
@@ -223,23 +225,64 @@ def test_a_repo_url_naming_no_repository_is_refused_not_guessed_at() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Opening, reusing and refusing
+# Opening, updating and refusing
 # ---------------------------------------------------------------------------
 
 
-def test_reuses_an_already_open_pr_instead_of_opening_a_second_one() -> None:
-    proc = _happy(
+def _with_open_pr(number: int = 4, **replies: object) -> RecordingProcess:
+    """A happy process whose branch already carries open pull request ``number``."""
+    return _happy(
         **{
-            "gh api": completed(out='{"ahead_by": 1}'),
-            "gh pr list": completed(out="https://github.com/o/r/pull/4\n"),
+            "gh pr list": completed(
+                out=f'[{{"number": {number}, "url": "https://github.com/o/r/pull/{number}"}}]'
+            ),
+            **replies,
         }
     )
+
+
+def test_a_second_run_rewrites_the_pull_request_it_finds() -> None:
+    """A PR left describing only the first run tells a reviewer about half the
+    work in front of them, so every run writes the description afresh."""
+    proc = _with_open_pr()
+    harness = FakeHarness(summary="Add the widget and the gauge\n\nBoth, now.")
+
+    result = GitHubSink(harness=harness, proc=proc).deliver(_delivery())
+
+    assert result.ok
+    assert result.url == "https://github.com/o/r/pull/4"
+    assert result.summary == "updated PR"
+    assert not any(c[:3] == ["gh", "pr", "create"] for c in proc.calls)
+
+    edit = next(c for c in proc.calls if c[:3] == ["gh", "pr", "edit"])
+    assert edit[3] == "4"
+    assert edit[edit.index("--title") + 1].endswith("Add the widget and the gauge")
+    assert "Both, now." in edit[edit.index("--body") + 1]
+
+
+def test_the_description_of_a_second_run_covers_the_whole_pull_request() -> None:
+    """`changes.base_sha` on a second run is the *first* run's tip, so
+    describing this run's range would describe only the increment."""
+    proc = _with_open_pr(number=7)
+    harness = FakeHarness(summary="Add the widget")
+
+    GitHubSink(harness=harness, proc=proc).deliver(_delivery())
+
+    change = harness.summarize_calls[0][0]
+    assert "gh pr diff 7 -R o/r" in change
+    assert "base-sha...head-sha" not in change
+
+
+def test_a_rewrite_that_fails_still_delivers_and_says_so() -> None:
+    """The branch is pushed and the pull request is there to read — a stale
+    description is worth reporting, not failing the delivery over."""
+    proc = _with_open_pr(**{"gh pr edit": completed(code=1, err="gh: 403")})
 
     result = GitHubSink(proc=proc).deliver(_delivery())
 
     assert result.ok
     assert result.url == "https://github.com/o/r/pull/4"
-    assert not any(c[:3] == ["gh", "pr", "create"] for c in proc.calls)
+    assert "description not updated" in result.summary
 
 
 def test_refuses_when_there_are_no_changes_at_all() -> None:
@@ -295,7 +338,7 @@ def test_uses_a_mechanical_description_with_no_harness() -> None:
 
 
 def test_uses_the_harness_summary_when_one_is_available() -> None:
-    proc = _happy(**{"git diff": completed(out="--- a\n+++ b\n")})
+    proc = _happy()
     harness = FakeHarness(summary="Add the widget\n\nBecause it was missing.")
 
     result = GitHubSink(harness=harness, summary_model="haiku", proc=proc).deliver(_delivery())
@@ -303,22 +346,36 @@ def test_uses_the_harness_summary_when_one_is_available() -> None:
     assert result.ok
     assert result.summary == "opened PR"
     assert len(harness.summarize_calls) == 1
-    diff, context, model, folder, guidance = harness.summarize_calls[0]
-    assert diff == "--- a\n+++ b\n"
+    change, context, model, folder, guidance, _ = harness.summarize_calls[0]
     assert context == "did the thing"  # the agent's own Changed.summary
     assert model == "haiku"
     assert folder == "/repo"
     assert guidance == ""  # the delivery carried none
+
+    # No diff is fetched for the summarizer at all — it is told where to look.
+    assert "base-sha...head-sha" in change
+    assert not any(c[:2] == ["git", "diff"] for c in proc.calls)
 
     create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
     assert create[create.index("--title") + 1].endswith("Add the widget")
     assert "Because it was missing." in create[create.index("--body") + 1]
 
 
+def test_the_summarizer_call_carries_the_runs_forge_credentials() -> None:
+    """The summarizer reads the change with `gh`, so it must authenticate as the
+    same identity that pushed the branch."""
+    proc = _happy()
+    harness = FakeHarness(summary="Add the widget")
+
+    GitHubSink(harness=harness, proc=proc).deliver(_delivery(forge_env={"GH_TOKEN": "t"}))
+
+    assert harness.summarize_calls[0][5] == {"GH_TOKEN": "t"}
+
+
 def test_the_pr_summary_call_carries_the_boards_guidance() -> None:
     """`Delivery.guidance` — the board's `writing-pull-requests` skill, already
     resolved by `run.execute` — reaches the summarizer call unchanged."""
-    proc = _happy(**{"git diff": completed(out="--- a\n+++ b\n")})
+    proc = _happy()
     harness = FakeHarness(summary="Add the widget")
 
     GitHubSink(harness=harness, proc=proc).deliver(_delivery(guidance="Title in the imperative."))
@@ -327,16 +384,17 @@ def test_the_pr_summary_call_carries_the_boards_guidance() -> None:
     assert harness.summarize_calls[0][4] == "Title in the imperative."
 
 
-def test_a_checkout_reads_its_diff_locally_and_asks_the_forge_for_nothing() -> None:
+def test_a_checkout_is_told_to_read_the_change_locally() -> None:
     """With a working copy there is no reason to spend an API call on the diff."""
-    proc = _happy(**{"git diff": completed(out="--- a\n+++ b\n")})
+    proc = _happy()
     harness = FakeHarness(summary="Add the widget")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(_delivery())
 
     assert result.ok
-    assert any(c[:2] == ["git", "diff"] for c in proc.calls)
-    assert not any("vnd.github.v3.diff" in " ".join(c) for c in proc.calls)
+    change = harness.summarize_calls[0][0]
+    assert "git diff base-sha...head-sha" in change
+    assert "gh api" not in change
 
 
 class _CwdWatchingHarness(FakeHarness):
@@ -348,20 +406,17 @@ class _CwdWatchingHarness(FakeHarness):
 
     folder_existed = False
 
-    def summarize(
-        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
-    ) -> str:
+    def summarize(self, *, folder: str, **kwargs: object) -> str:
         """Note the cwd's existence, then answer as FakeHarness does."""
         self.folder_existed = bool(folder) and Path(folder).is_dir()
-        return super().summarize(
-            diff, context=context, model=model, folder=folder, guidance=guidance
-        )
+        return super().summarize(folder=folder, **kwargs)  # type: ignore[arg-type]
 
 
 def test_no_checkout_still_gets_the_model_written_description() -> None:
     """A clone-based or sandboxed connection keeps no working copy here, so the
-    diff comes from the forge — the description is the model's either way."""
-    proc = _happy(**{"vnd.github.v3.diff": completed(out="--- a\n+++ b\n")})
+    summarizer is pointed at the forge — the description is the model's either
+    way."""
+    proc = _happy()
     harness = _CwdWatchingHarness(summary="Add the widget\n\nBecause it was missing.")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(
@@ -371,8 +426,8 @@ def test_no_checkout_still_gets_the_model_written_description() -> None:
     assert result.ok
     assert result.summary == "opened PR"
 
-    diff, _, _, _, _ = harness.summarize_calls[0]
-    assert diff == "--- a\n+++ b\n"
+    change = harness.summarize_calls[0][0]
+    assert "repos/o/r/compare/base-sha...head-sha" in change
     assert harness.folder_existed  # a real cwd, never the listener's own
 
     create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
@@ -380,28 +435,10 @@ def test_no_checkout_still_gets_the_model_written_description() -> None:
     assert "Because it was missing." in create[create.index("--body") + 1]
 
 
-def test_a_diff_nobody_can_supply_says_so_in_the_delivery_summary() -> None:
-    """The PR still opens with the mechanical description, and the person
-    reading the task comment is told why it reads that way."""
-    proc = _happy(**{"vnd.github.v3.diff": completed(code=1, err="not found")})
-    harness = FakeHarness(summary="Add the widget")
-
-    result = GitHubSink(harness=harness, proc=proc).deliver(
-        _delivery(folder="", summary="fixed the thing")
-    )
-
-    assert result.ok
-    assert harness.summarize_calls == []
-    assert "no diff available" in result.summary
-
-    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
-    assert "fixed the thing" in create[create.index("--title") + 1]
-
-
 def test_falls_back_to_a_mechanical_description_when_the_harness_says_nothing() -> None:
     """An empty summarizer reply (or one that fails) must not crash the sink,
     nor open a PR with a blank title — the mechanical fallback still applies."""
-    proc = _happy(**{"git diff": completed(out="")})
+    proc = _happy()
     harness = FakeHarness(summary="")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(_delivery(summary="the fallback text"))
@@ -451,7 +488,7 @@ def test_a_long_mechanical_title_is_cut_back_to_a_whole_word() -> None:
 
 def test_a_model_title_that_repeats_the_ref_is_not_prefixed_twice() -> None:
     """The summarizer is told not to write the ref and sometimes does anyway."""
-    proc = _happy(**{"git diff": completed(out="--- a\n+++ b\n")})
+    proc = _happy()
     harness = FakeHarness(summary="ISS-152 - Add the widget\n\nBecause it was missing.")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(_delivery(ref="ISS-152"))
@@ -507,7 +544,7 @@ def test_a_required_sink_does_not_fail_a_successful_clone_connection():
     proc = RecordingProcess(
         replies={
             "gh api": Completed([], 0, '{"ahead_by": 3}'),
-            "gh pr list": Completed([], 0, ""),
+            "gh pr list": Completed([], 0, "[]"),
             "gh pr create": Completed([], 0, "https://github.com/o/r/pull/9"),
             # Anything needing a working copy must never be reached.
             "git ": Completed([], 128, "", "not a git repository"),

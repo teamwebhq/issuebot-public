@@ -40,6 +40,9 @@ class ScriptedApi:
         self.released = threading.Event()
         self.claims: list[str] = []
         self.releases: list[dict[str, Any]] = []
+        # What each release reported the run did, kept beside `releases` so a
+        # test asserting how a run ended is not also asserting what it did.
+        self.release_results: list[dict[str, Any] | None] = []
         self.comments: list[tuple[str, str]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
         # The order the board was called in, which the per-method lists above
@@ -89,8 +92,16 @@ class ScriptedApi:
     def heartbeat(self, run_id: str) -> None:
         pass
 
-    def release(self, run_id: str, *, status: str = "done", note: str | None = None) -> None:
+    def release(
+        self,
+        run_id: str,
+        *,
+        status: str = "done",
+        note: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> None:
         self.releases.append({"run_id": run_id, "status": status, "note": note})
+        self.release_results.append(result)
         self.calls.append("release")
         self.released.set()
 
@@ -385,6 +396,49 @@ def test_a_best_effort_sink_failing_does_not_cancel_the_decisions() -> None:
     assert api.releases[0]["status"] == "done"
 
 
+def test_what_the_sinks_did_reaches_the_release() -> None:
+    """The release reports the run, and the pull request is a sink's doing —
+    so what the sinks did has to travel from delivery to release."""
+
+    class PrSink:
+        """A sink that opened a pull request, and says where."""
+
+        name = "pr"
+        accepts = frozenset({"changes"})
+
+        def deliver(self, delivery):
+            """Report the pull request this delivery opened."""
+            return SinkResult(
+                sink=self.name,
+                ok=True,
+                summary="opened PR",
+                url="https://github.com/acme/web/pull/7",
+            )
+
+    ex = StubEnvironment(_changed_and_handoff())
+    item = _work_item()
+    api = ScriptedApi(item)
+    listener = ProjectListener(
+        wiring(
+            _GIT_PROJECT,
+            api=api,
+            environment=ex,
+            sinks=[(SinkRef(name="pr", required=True), PrSink())],
+        )
+    )
+
+    listener._process(item)
+
+    assert api.release_results[0]["pull_requests"] == [
+        {
+            "repo": "acme/web",
+            "number": 7,
+            "url": "https://github.com/acme/web/pull/7",
+            "state": "open",
+        }
+    ]
+
+
 def test_deliverables_run_before_decisions() -> None:
     """A decision usually refers to a deliverable — reassigning first hands
     the reviewer a task with nothing to look at."""
@@ -673,8 +727,16 @@ class _ConcurrentApi(ScriptedApi):
         self.claims.append(task_id)
         return {"run_id": f"r-{task_id}", "task_id": task_id}
 
-    def release(self, run_id: str, *, status: str = "done", note: str | None = None) -> None:
+    def release(
+        self,
+        run_id: str,
+        *,
+        status: str = "done",
+        note: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> None:
         self.releases.append({"run_id": run_id, "status": status, "note": note})
+        self.release_results.append(result)
         if len(self.releases) >= len(self._work_items):
             self.all_released.set()
 
@@ -1323,7 +1385,9 @@ def test_claim_reports_the_install_and_executor(tmp_path: Path) -> None:
     # The environment resolved off the registry, never spelled: this is the same
     # class of coupling the deletion suite exists to catch, and the matcher
     # cannot see this one.
-    assert api.claim_kwargs == [{"install_id": "inst-9", "executor": in_process_environment()}]
+    assert api.claim_kwargs == [
+        {"install_id": "inst-9", "executor": in_process_environment(), "mode": "edit_code"}
+    ]
 
 
 def test_status_stays_working_until_the_last_concurrent_run_finishes() -> None:

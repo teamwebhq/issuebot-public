@@ -13,6 +13,7 @@ from issuebot import runner
 from issuebot.contracts import (
     Answer,
     Changed,
+    Changes,
     Claim,
     Handoff,
     NeedsInput,
@@ -149,6 +150,91 @@ def test_release_reports_done_or_failed_with_the_result_text():
         {"run_id": "r1", "status": "done", "note": "ok"},
         {"run_id": "r1", "status": "failed", "note": "broke"},
     ]
+
+
+def test_the_claim_says_what_the_run_will_actually_do():
+    """The board can only show what is about to happen if the claim says so —
+    and what is about to happen is the connection's answer, not the column's."""
+    deferring = FakeApi()
+    _source(deferring).claim(work(mode="research"))
+
+    overriding = FakeApi()
+    _source(overriding, mode="build").claim(work(mode="research"))
+
+    assert deferring.claim_kwargs[0]["mode"] == "research"
+    assert overriding.claim_kwargs[0]["mode"] == "edit_code"
+
+
+def _pushed(**overrides) -> Changes:
+    """A pushed branch with one changed file, as the environment derived it."""
+    fields = {
+        "branch": "issuebot/ISS-1",
+        "base_sha": "aaa",
+        "head_sha": "bbb",
+        "stat": " one.py | 2 +-",
+        "files_changed": 1,
+        "pushed": True,
+    }
+    fields.update(overrides)
+    return Changes(**fields)
+
+
+def test_releasing_reports_what_the_run_did():
+    api = FakeApi()
+    response = Response(
+        status="done",
+        changes=_pushed(),
+        outputs=[Changed(summary="added the endpoint")],
+        sink_results=(
+            SinkResult(
+                sink="github",
+                ok=True,
+                summary="opened PR",
+                url="https://github.com/acme/web/pull/7",
+            ),
+        ),
+    )
+
+    _source(api).release(Claim(work_id="t1", token="r1"), response)
+
+    (result,) = api.release_results
+    assert result["summary"] == "added the endpoint"
+    assert result["changed_code"] is True
+    assert result["pushed"] is True
+    assert result["branches"] == [{"branch": "issuebot/ISS-1", "files_changed": 1}]
+    assert result["pull_requests"] == [
+        {
+            "repo": "acme/web",
+            "number": 7,
+            "url": "https://github.com/acme/web/pull/7",
+            "state": "open",
+        }
+    ]
+
+
+def test_a_branch_that_never_reached_origin_is_reported_as_unpushed():
+    """The board is told the branch exists, and told separately that the work
+    never left this machine — the runner did the pushing, so it knows."""
+    api = FakeApi()
+    response = Response(status="done", changes=_pushed(pushed=False))
+
+    _source(api).release(Claim(work_id="t1", token="r1"), response)
+
+    (result,) = api.release_results
+    assert result["pushed"] is False
+    assert result["branches"] == [{"branch": "issuebot/ISS-1", "files_changed": 1}]
+
+
+def test_a_run_that_answered_reports_the_answer_and_no_code():
+    api = FakeApi()
+    response = Response(status="done", outputs=[Answer(text="the cache is cold on boot")])
+
+    _source(api).release(Claim(work_id="t1", token="r1"), response)
+
+    (result,) = api.release_results
+    assert result["summary"] == "the cache is cold on boot"
+    assert result["changed_code"] is False
+    assert result["pull_requests"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +434,60 @@ def test_a_respond_mode_mention_is_unaffected():
     a second, contradictory restriction."""
     source = _source(mode="respond")
     assert source.permits(mention()) == {"answer", "needs_input", "handoff"}
+
+
+def test_a_column_asking_for_research_bars_changes_on_a_board_deciding_connection():
+    """The default connection does what the item's column asked for, so a
+    research column's run cannot report `changes` any more than a mention can."""
+    source = _source()
+    assert "changes" not in source.permits(work(mode="research"))
+
+
+def test_a_column_asking_for_nothing_still_builds():
+    """The whole backwards-compatibility promise: an older board, or a column
+    with nothing selected, leaves the run exactly as it was."""
+    source = _source()
+    assert "changes" in source.permits(work())
+
+
+def test_an_overriding_connection_ignores_what_the_column_asked_for():
+    """`build` and `respond` are overrides, not preferences: the item is not
+    consulted at all."""
+    assert "changes" in _source(mode="build").permits(work(mode="research"))
+    assert "changes" not in _source(mode="respond").permits(work(mode="edit_code"))
+
+
+def test_a_board_deciding_run_launches_with_the_columns_own_prompt():
+    """The column composed the whole document, so that is what the agent is
+    launched with — filled with the same tags the board's own documents use."""
+    source = _source()
+    item = work(reference="ISS-9", prompt="Research {reference} and report back.", mode="research")
+
+    prompt = source.prompt(item, connection(), permits=source.permits(item))
+
+    assert "Research ISS-9 and report back." in prompt
+
+
+def test_a_run_whose_column_composed_nothing_uses_the_boards_own_document():
+    source = _source()
+    item = work(reference="ISS-9")
+
+    prompt = source.prompt(item, connection(), permits=source.permits(item))
+
+    # `work_task` is the only stub document that carries the confirm setting.
+    assert "confirm:" in prompt
+
+
+def test_an_overriding_connection_keeps_the_boards_document():
+    """A connection told to respond responds, whatever the column composed —
+    which is why the item carries both task documents as well as the prompt."""
+    source = _source(mode="respond")
+    item = work(reference="ISS-9", prompt="Change everything.", mode="edit_code")
+
+    prompt = source.prompt(item, connection(mode="respond"), permits=source.permits(item))
+
+    assert "Change everything." not in prompt
+    assert "confirm:" not in prompt  # the board's `respond_task` document
 
 
 def test_an_assignment_prompt_carries_the_connections_done_setting():

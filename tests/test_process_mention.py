@@ -33,6 +33,9 @@ class MentionApi:
         self.claims: list[str] = []
         self.mention_claims: list[str] = []
         self.releases: list[dict[str, Any]] = []
+        # What each release reported the run did, kept beside `releases` so a
+        # test asserting how a run ended is not also asserting what it did.
+        self.release_results: list[dict[str, Any] | None] = []
         self.comments: list[tuple[str, str]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.heartbeats: list[str] = []
@@ -62,9 +65,17 @@ class MentionApi:
         """Record the heartbeat."""
         self.heartbeats.append(run_id)
 
-    def release(self, run_id: str, *, status: str = "done", note: str | None = None) -> None:
+    def release(
+        self,
+        run_id: str,
+        *,
+        status: str = "done",
+        note: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> None:
         """Record the release."""
         self.releases.append({"run_id": run_id, "status": status, "note": note})
+        self.release_results.append(result)
 
     def add_comment(self, task_id: str, body: str) -> dict[str, Any]:
         """Record the comment."""

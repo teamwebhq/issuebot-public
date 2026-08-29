@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -137,13 +137,28 @@ class Harness(ABC):
 
     @abstractmethod
     def summarize(
-        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
+        self,
+        *,
+        context: str,
+        change: str,
+        model: str | None,
+        folder: str,
+        guidance: str = "",
+        env: Mapping[str, str] | None = None,
     ) -> str:
-        """Generate PR title+body text from a diff. Tools-free and MCP-free; the
-        first output line is the title, the rest is the body. ``folder`` is the
-        cwd to run in. May raise; callers fall back to a mechanical description.
+        """Generate PR title+body text by reading the change itself. MCP-free
+        and read-only; the first output line is the title, the rest is the body.
+        ``folder`` is the cwd to run in. May raise; callers fall back to a
+        mechanical description.
+
+        ``change`` is prose from the sink naming the commands that show the
+        change. The harness carries it into its prompt and never reads it, so
+        knowing how a forge shows a change stays in the sink. Handing the agent
+        the way to look, rather than a diff cut to fit a prompt, is what lets a
+        large change be described from all of itself.
 
         ``guidance`` is the board's own PR-writing guidance for this run
         (``Delivery.guidance``, already resolved prose), to weave into the
         prompt however this harness's call shape allows; empty when the board
-        sent none."""
+        sent none. ``env`` is the run's forge credentials, so a ``gh`` call the
+        agent makes here authenticates as the identity that pushed the branch."""

@@ -116,9 +116,9 @@ wizard does these steps:
 2. The wizard gives a default name for the connection.
 3. It shows the installed environments and prompts you to select one.
 4. It prompts for the settings of the selected environment. For `local`, it
-   prompts for the mode and the source of the working copy. In `build` mode, it
-   prompts for `none`, `branch`, or `worktree`. It also prompts for the folder
-   or clone URL.
+   prompts for the mode and the source of the working copy. In `board` mode and
+   `build` mode, it prompts for `none`, `branch`, or `worktree`. It also prompts
+   for the folder or clone URL.
 5. It prompts for update-base only for a task branch. Then, it prompts for plan
    confirmation and done-mode.
 6. For each sink, it prompts you to select `no`, `required`, or `best-effort`.
@@ -167,7 +167,10 @@ plugin checks for each connection. All checks after the PAT check are warnings.
    `$ISSUEBOT_RESPONSE` variable. issuebot reads this file. The run fails if
    the file is missing or incorrect.
 9. **Commit changes** — if the run permits `changes`, the workspace commits the
-   changed files.
+   changed files. The message is the task reference and the summary that the
+   agent wrote in its `changes` output: the first line of that summary is the
+   subject, and the remainder is the body. A run that reports no `changes`
+   output commits with the task reference only.
 10. **Record changes** — issuebot gets the change data from `git`.
 11. **Push the branch** — issuebot pushes only if the branch head moved, `push`
     is `true`, and there is an `origin` remote.
@@ -364,7 +367,7 @@ issuebot connect --name myproj --board <board-id> --folder /path/to/repo \
 | `--isolation` | `git_init` | What to make in the working copy: `none` (default) makes nothing, `branch`, or `worktree`. Refer to [Workspaces](#workspaces) |
 | `--branch-prefix` | `branch_prefix` | Default `issuebot/`. If you change the default, use `branch` or `worktree` isolation |
 | `--update-base` | `update_base` | `none` (default), `rebase` or `merge` |
-| `--mode` | `mode` | `build` (default) or `respond` |
+| `--mode` | `mode` | `board` (default), `build` or `respond`. Refer to [What a run can report](#what-a-run-can-report) |
 | `--done` | `done` | `review` (default) or `complete` |
 | `--confirm` | `confirm` | `yes` (default) or `no`. If `yes`, the agent waits for approval of the plan before it writes code |
 | `--executor` | `executor` | Installed environment. `--help` shows the list. Necessary only if more than one is installed |
@@ -405,7 +408,7 @@ $ issuebot connections
 2 connections:
 
 myproj  ·  board board-1  ·  /home/me/code/myproj
-    mode           build
+    mode           board
     isolation      worktree
     done           review
     confirm        yes
@@ -573,7 +576,7 @@ decision to the source. A run can report a maximum of one decision.
 Two conditions decrease the output kinds that a run can report:
 
 - **The kind of work.** An assignment can report all four kinds. An **@mention**
-  cannot report `changes`. A connection with `mode = "respond"` also cannot
+  cannot report `changes`. A run that responds instead of builds also cannot
   report `changes`.
 - **The workspace.** A [workspace](#workspaces) without a task branch cannot
   report `changes`.
@@ -581,14 +584,28 @@ Two conditions decrease the output kinds that a run can report:
 The agent prompt shows only the permitted kinds. issuebot rejects each other
 kind.
 
-The `mode` setting controls the first condition. The `respond` mode permits all
-kinds other than `changes`. The mode does not select the workspace.
+The `mode` setting controls the first condition. It has three values:
 
-The `respond` mode is not a sandbox. A run in `respond` mode can report only
-kinds other than `changes`.
+| Value | What the connection does |
+|---|---|
+| `board` (default) | Each task does what its board column asks for: it builds, or it responds. A column that asks for nothing builds |
+| `build` | Always build, whatever the column asks for |
+| `respond` | Always respond, whatever the column asks for |
+
+A board column also composes the prompt for the tasks in it. A connection in
+`board` mode launches the agent with that prompt. When the column composes none,
+and for the two overrides, the run uses the board's own instruction document for
+build work or respond work. The mode does not select the workspace.
+
+A response is not a sandbox. A run that responds can report only kinds other
+than `changes`.
 issuebot tells the agent not to change files and rejects a `changes` output.
 The agent has its usual file tools and shell tools. Refer to
 [Security](#security).
+
+At the end of a run, issuebot tells the board what the run did: the agent's own
+summary, whether it changed and pushed code, the branch it made (pushed or not),
+and each pull request that a sink opened. The board shows this on the task.
 
 ## Sinks
 
@@ -626,18 +643,33 @@ accepts only `changes` from a pushed branch. It does these steps:
    on `origin`.
 4. **Do a check of the remote branch** — the sink uses the GitHub compare API.
    The branch head must be after its base.
-5. **Make the description** — the harness makes the pull request title and body
-   from the local diff, following the board's `writing-pull-requests` skill
-   when it sent one (see [Skills, plans and confirmation](#skills-plans-and-confirmation)).
-   The `[github] summary_model` key sets the model.
-6. **Find an open pull request** — the sink uses an open pull request that it
-   finds for the branch.
-7. **Open a pull request** — if the sink does not find an open pull request, it
-   opens one with the `gh` CLI.
+5. **Find an open pull request** — the sink looks for an open pull request for
+   the branch. The sink does this step before the description, because the
+   description tells the reader what the pull request contains.
+6. **Make the description** — the harness makes the pull request title and body.
+   The sink tells the harness where the change is; the harness reads it. For a
+   new pull request, the change is the range from the base to the head of the
+   branch. For a pull request that is already open, the change is the whole
+   pull request. The harness follows the board's `writing-pull-requests` skill
+   when the board sent one (see
+   [Skills, plans and confirmation](#skills-plans-and-confirmation)). The
+   `[github] summary_model` key sets the model.
+7. **Open or update the pull request** — if the sink found no open pull request,
+   it opens one with the `gh` CLI. If it found one, it replaces the title and
+   the body of that pull request.
 
-The sink cannot use the harness when the controller has no checkout. It also
-cannot use it if the harness is missing, fails, or gives empty text. In these
-cases, the sink uses the `changes` summary and `git diff --stat` data.
+**Each run writes the whole description again.** A second run on the same
+branch describes the pull request as it then is. This keeps the description
+correct for all of the work in the pull request. It also removes changes that a
+person made to the body. Write such notes in a review comment.
+
+If the sink cannot update the description, the delivery is still a success: the
+branch is on `origin` and the pull request is there to read. The delivery
+report says that the description is not new.
+
+The sink cannot use the harness if the harness is missing, fails, or gives
+empty text. In these cases, the sink uses the `changes` summary and
+`git diff --stat` data.
 
 The GitHub API path includes the repository name. Each `gh pr` command uses
 `-R owner/name`.
@@ -978,7 +1010,7 @@ board's skills.
 One of those skills gets a second use. When the `github` sink asks the harness
 to write a pull request description (see [Sinks](#sinks)), it carries the
 board's `writing-pull-requests` skill along, already resolved to plain prose,
-and the harness weaves it into that tools-free call. That call loads no
+and the harness weaves it into that read-only call. That call loads no
 plugin, so this is the only way the board's guidance reaches it — a task the
 board sends no such skill for gets a plain description with none.
 
@@ -1081,7 +1113,13 @@ you delete them.
   uses `--dangerously-skip-permissions`, thus the agent can change files and
   run commands in its workspace. Use issuebot only with a workspace and a branch
   that the agent can safely change.
-- **The `respond` mode is a restriction on the report, not on the tools.** Refer
+- **The description agent reads, but does not write.** To write a pull request
+  description, the `claude` harness runs a second, separate agent with a
+  read-only tool list: it can read files and run `git diff`, `git log`,
+  `git show`, `git status` and read-only `gh` commands. It does not get
+  `--dangerously-skip-permissions`. If a tool is refused, the sink uses the
+  mechanical description instead.
+- **A response is a restriction on the report, not on the tools.** Refer
   to [What a run can report](#what-a-run-can-report). The agent keeps its file
   tools and shell tools. For full containment, use a sandbox environment for the
   connection.

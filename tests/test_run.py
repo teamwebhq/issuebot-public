@@ -32,7 +32,7 @@ from conftest import (
 )
 from issuebot.agent_state import AgentState
 from issuebot.board_skills import Bundle
-from issuebot.contracts import Changes, Job, McpServer
+from issuebot.contracts import Changed, Changes, Job, McpServer
 from issuebot.plugins.harnesses.base import LaunchResult, LaunchSpec
 from issuebot.plugins.harnesses.fake.harness import FakeHarness, write_response
 from issuebot.plugins.workspaces.base import WorkspaceProblem
@@ -117,6 +117,48 @@ def test_the_agent_cannot_report_changes_it_did_not_make():
     )
     response = _run(harness=FakeHarness(result_text="did loads"), workspace=workspace)
     assert response.changes.empty
+
+
+def test_the_commit_says_what_the_run_did_in_the_agents_own_words():
+    """Every commit reading as the bare reference tells a reader nothing; the
+    agent already wrote what it did, so that is the subject line, with the rest
+    of its summary as the body."""
+    workspace = FakeWorkspace()
+    harness = FakeHarness(
+        outputs=[Changed(summary="Add the widget\n\nIt was missing from the gauge.")]
+    )
+
+    _run(harness=harness, workspace=workspace)
+
+    (_, message) = workspace.commit_calls[0]
+    assert message == "ISS-1: Add the widget\n\nIt was missing from the gauge."
+
+
+def test_a_summary_too_long_for_the_subject_survives_in_the_commit_body():
+    """The subject is capped at a title's width, but a commit that drops the
+    tail of what the agent said leaves those words nowhere in history — so the
+    whole summary follows as the body when the subject cannot hold it."""
+    workspace = FakeWorkspace()
+    summary = (
+        "Added the column picker, its tests, and the migration that backfills every existing row."
+    )
+    harness = FakeHarness(outputs=[Changed(summary=summary)])
+
+    _run(harness=harness, workspace=workspace)
+
+    (_, message) = workspace.commit_calls[0]
+    subject, _, body = message.partition("\n")
+    assert len(subject) <= 72
+    assert body.strip() == summary
+
+
+def test_a_run_that_reported_no_changes_commits_under_the_bare_ref():
+    """Nothing said what the commit did, so there is nothing better to write."""
+    workspace = FakeWorkspace()
+
+    _run(harness=FakeHarness(outputs=[]), workspace=workspace)
+
+    assert workspace.commit_calls[0][1] == "ISS-1"
 
 
 def test_changes_are_not_derived_when_not_permitted():

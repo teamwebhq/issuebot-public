@@ -441,7 +441,7 @@ class _RecordingHarness(Harness):
         raise NotImplementedError
 
     def summarize(  # pragma: no cover - never run
-        self, diff, *, context, model, folder, guidance=""
+        self, *, context, change, model, folder, guidance="", env=None
     ):
         raise NotImplementedError
 

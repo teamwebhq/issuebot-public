@@ -11,6 +11,7 @@ import json
 import logging
 import tempfile
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 from issuebot.events import AgentEvent
@@ -32,12 +33,22 @@ _RETRYABLE_MARKERS = ("overloaded", "error: 529", "status code 529", "status 529
 # skill, because it is what `_describe` in the GitHub sink parses back out,
 # and it must still be stated even when {guidance} is empty.
 _SUMMARY_PROMPT = (
-    "Write a pull request title and description for the following change.\n"
-    "Output the title on the first line, then a blank line, then a concise "
-    "markdown description. Do not include backticks around the whole "
-    "response.\n\n"
+    "Write a pull request title and description for a change you must read "
+    "first.\n\n"
+    "{change}\n\n"
+    "Read as much of the change as you need, then output the title on the "
+    "first line, then a blank line, then a concise markdown description. Do "
+    "not include backticks around the whole response.\n\n"
     "{guidance}\n\n"
-    "Task context:\n{context}\n\nDiff:\n{diff}\n"
+    "Task context:\n{context}\n"
+)
+
+# What the description call may do: look at the change, and nothing else. Every
+# entry reads; not one writes.
+_SUMMARY_TOOLS = (
+    "Read,Grep,Glob,"
+    "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),"
+    "Bash(gh api:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
 )
 
 
@@ -167,32 +178,53 @@ class ClaudeHarness(Harness):
         )
 
     def summarize(
-        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
+        self,
+        *,
+        context: str,
+        change: str,
+        model: str | None,
+        folder: str,
+        guidance: str = "",
+        env: Mapping[str, str] | None = None,
     ) -> str:
-        """Generate PR text from a diff via a tools-free, MCP-free `claude -p`.
-        Runs in ``folder`` and returns the collected stdout."""
-        prompt = _SUMMARY_PROMPT.format(guidance=guidance, context=context, diff=diff)
+        """Generate PR text via a read-only, MCP-free `claude -p` that reads the
+        change ``change`` names. Runs in ``folder`` and returns the collected
+        stdout."""
+        prompt = _SUMMARY_PROMPT.format(guidance=guidance, context=context, change=change)
         argv = [
             self._command,
-            # No prompt argument: `claude -p` reads it from stdin instead. A
-            # diff-carrying prompt runs to hundreds of kilobytes, and a single
-            # argv entry cannot exceed 128KB on Linux — one in argv failed the
-            # exec with "Argument list too long" and cost every large change its
-            # written PR description.
+            # No prompt argument: `claude -p` reads it from stdin instead, which
+            # is the only way to hand a program text of unbounded size — the
+            # board's guidance and the task context both arrive from elsewhere
+            # and neither has a length this harness controls.
             "-p",
             # MCP-free for real: with no --mcp-config to name any, this says
             # "only the ones named there", i.e. none. Without it the user's own
             # globally configured servers load — every one of them started and
-            # handshaked — to write a PR description from a diff already in the
-            # prompt.
+            # handshaked — to write one PR description.
             "--strict-mcp-config",
             "--output-format",
             "text",
+            # Read-only, and deliberately not `--dangerously-skip-permissions`
+            # the way `launch` is: a denied tool costs this call its written
+            # description and falls back to the mechanical one, which is a far
+            # better failure than giving a description-writing call write access
+            # to somebody's checkout.
+            "--allowedTools",
+            _SUMMARY_TOOLS,
         ]
         if model:
             argv += ["--model", model]
         out: list[str] = []
-        code = self._proc.spawn(argv, on_line=out.append, cwd=folder, stdin=prompt)
+        code = self._proc.spawn(
+            argv,
+            on_line=out.append,
+            cwd=folder,
+            # The run's forge credentials, so a `gh` call the agent makes while
+            # reading the change authenticates as whoever pushed the branch.
+            env=dict(env) if env else None,
+            stdin=prompt,
+        )
         text = "\n".join(out).strip()
 
         # An empty answer here is the caller's cue to fall back to a mechanical

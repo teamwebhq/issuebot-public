@@ -46,8 +46,12 @@ Chooser = Callable[..., Any]
 # can answer.
 _HELP: dict[str, dict[str, str]] = {
     "Mode": {
-        "build": "the agent may change code and report the changes",
-        "respond": "the agent answers and comments only, never reporting changes",
+        "board": (
+            "let the board decide: use the prompt the column gives, and change "
+            "code when it gives none"
+        ),
+        "build": "always change code and report the changes, whatever the column asks for",
+        "respond": "always answer and comment only, never reporting changes",
     },
     # The agent always plans, and always asks about genuine ambiguity — neither
     # is worth offering as a choice. Whether it waits for you to sign the plan
@@ -140,8 +144,8 @@ def settings(*, choose_literal: Any, sandboxed: bool) -> tuple[dict[str, Any], b
     (core's own output-kind vocabulary). The wizard hands that on to the
     workspace hook, which then skips the branch questions a read-only
     connection has no use for — without core ever reading ``mode`` by name.
-    The judgement mirrors :meth:`Issuebear.permits`, where ``respond`` bars
-    ``changes`` whatever kind of work arrived.
+    The judgement mirrors :meth:`Issuebear.permits`, where only the ``respond``
+    override bars ``changes`` on every run alike.
 
     ``sandboxed`` says the chosen environment boots a fresh machine per task.
     Mode is then forced to "build" rather than asked: a machine booted for one
@@ -154,7 +158,7 @@ def settings(*, choose_literal: Any, sandboxed: bool) -> tuple[dict[str, Any], b
     mode = (
         "build"
         if sandboxed
-        else choose_literal("Mode", get_args(Mode), "build", help_for=_HELP["Mode"])
+        else choose_literal("Mode", get_args(Mode), "board", help_for=_HELP["Mode"])
     )
 
     # A two-value menu rather than a y/n prompt so it reads like every other
@@ -169,4 +173,8 @@ def settings(*, choose_literal: Any, sandboxed: bool) -> tuple[dict[str, Any], b
 
     done = choose_literal("Done mode", get_args(DoneMode), "review", help_for=_HELP["Done mode"])
 
-    return {"mode": mode, "confirm": confirm, "done": done}, mode == "build"
+    # `board` may report changes: only the `respond` override rules them out
+    # for every run alike. A board-deciding connection whose column asks for
+    # research reports none on that run, but the connection as a whole still
+    # builds, and it is the connection the branch questions are about.
+    return {"mode": mode, "confirm": confirm, "done": done}, mode != "respond"

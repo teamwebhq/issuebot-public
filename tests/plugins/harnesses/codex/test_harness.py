@@ -76,4 +76,4 @@ def test_codex_summarize_not_supported():
     """Codex has no tools-free one-shot mode wired up yet; callers fall back to
     the mechanical PR description."""
     with pytest.raises(NotImplementedError):
-        CodexHarness().summarize("diff", context="ctx", model=None, folder="/tmp")
+        CodexHarness().summarize(change="read it", context="ctx", model=None, folder="/tmp")

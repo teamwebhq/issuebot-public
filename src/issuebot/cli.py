@@ -58,7 +58,7 @@ plugins.mount_cli(app)
 DoneFlag = Literal["review", "complete"]
 ConfirmFlag = Literal["yes", "no"]
 IsolationFlag = Literal["none", "branch", "worktree"]
-ModeFlag = Literal["build", "respond"]
+ModeFlag = Literal["board", "build", "respond"]
 UpdateBaseFlag = Literal["none", "rebase", "merge"]
 
 
@@ -206,7 +206,7 @@ def connect(
     ),
     isolation: IsolationFlag = typer.Option("none", "--isolation"),
     branch_prefix: str = typer.Option("issuebot/", "--branch-prefix"),
-    mode: ModeFlag = typer.Option("build", "--mode"),
+    mode: ModeFlag = typer.Option("board", "--mode"),
     update_base: UpdateBaseFlag = typer.Option("none", "--update-base"),
     executor: str = typer.Option(
         None,

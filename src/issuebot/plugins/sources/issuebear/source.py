@@ -6,6 +6,7 @@ work item, built on top of the thin REST client in ``client.py``.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from typing import Any, ClassVar, Protocol
 
@@ -18,6 +19,8 @@ from issuebot.config import (
     maybe_executor_name,
 )
 from issuebot.contracts import (
+    Answer,
+    Changed,
     Claim,
     Handoff,
     McpServer,
@@ -31,6 +34,7 @@ from issuebot.contracts import (
 from issuebot.plugins.sources.base import Source
 from issuebot.plugins.sources.issuebear import messages, prompts
 from issuebot.plugins.sources.issuebear.client import AlreadyClaimed, IssuebotClient
+from issuebot.plugins.sources.issuebear.settings import BOARD_MODES, WIRE_MODES
 from issuebot.plugins.workspaces.base import WorkspaceProblem
 from issuebot.transient import describe_transient, is_transient
 
@@ -44,6 +48,117 @@ _ASSIGNMENT_PERMITS: frozenset[OutputKind] = frozenset(
     {"changes", "answer", "needs_input", "handoff"}
 )
 _MENTION_PERMITS: frozenset[OutputKind] = frozenset({"answer", "needs_input", "handoff"})
+
+# Parade stores a run's summary in a 2,000-character column, and rejects the
+# whole release rather than truncating an over-long one — so the trim happens
+# here, where losing the tail of a summary is all it costs.
+_SUMMARY_LIMIT = 2000
+
+# The shape of a pull request's own URL on a forge: owner, repository, number.
+# A sink reports whatever URL it produced, and only the ones that look like
+# this are a pull request the board can be told a number for.
+_PR_URL = re.compile(r"/([^/]+/[^/]+)/pull/(\d+)")
+
+
+def effective_mode(connection: Connection, work: WorkItem) -> str:
+    """``"build"`` or ``"respond"``: what this run will actually do.
+
+    The connection's own setting decides who is asked. ``"build"`` and
+    ``"respond"`` are overrides — this connection always does the one thing,
+    whatever the board wanted, so the item is not consulted at all. ``"board"``,
+    the default, takes the item's own ``mode``: the column the task sits in says
+    what the work is for, and this connection does that.
+
+    A board that asked for nothing — an older server, or a column with no
+    instructions selected — falls back to ``"build"``, which is exactly what
+    every connection did before a column could ask for anything.
+    """
+    setting = conn_setting(connection, "mode", "board")
+    if setting != "board":
+        return str(setting)
+
+    return BOARD_MODES.get(work.mode or "", "build")
+
+
+def _pull_requests(results: tuple[SinkResult, ...]) -> list[dict[str, Any]]:
+    """The pull requests this run's sinks opened, in the board's own terms.
+
+    Read off the URLs the sinks reported rather than from anything they say
+    about themselves: a sink is free to describe its work however it likes, and
+    a URL shaped like a pull request is the one part of that this source can
+    turn into a repository and a number. Anything else a sink produced — a
+    deployment, a comment — is not a pull request and is left out.
+
+    Every one of these was opened by the run that is releasing, so ``open`` is
+    the state each is in as this runner last saw it.
+    """
+    found: list[dict[str, Any]] = []
+
+    for result in results:
+        match = _PR_URL.search(result.url or "") if result.ok else None
+        if match is not None:
+            found.append(
+                {
+                    "repo": match.group(1),
+                    "number": int(match.group(2)),
+                    "url": result.url,
+                    "state": "open",
+                }
+            )
+
+    return found
+
+
+def _run_result(connection: Connection, response: Response) -> dict[str, Any]:
+    """What the run did, in the board's release vocabulary.
+
+    The board shows this on the task instead of "agent finished working", and
+    reads it as a column's exit condition — so what goes in it is what actually
+    happened, never what would be flattering to claim.
+
+    ``summary`` is the agent's own words: the summary or answer it wrote in its
+    response document, falling back to whatever the harness left as the run's
+    result text. The two booleans and the branch come from `Changes`, which the
+    environment derived from git rather than taking the agent's word for.
+
+    A branch is listed whenever the run produced commits, whether or not it
+    reached origin — the board is told what the run did, and ``pushed`` says
+    separately whether the work left this machine.
+    """
+    summary = ""
+    for output in response.deliverables:
+        if isinstance(output, Changed):
+            summary = output.summary
+            break
+        if isinstance(output, Answer):
+            summary = output.text
+            break
+
+    changes = response.changes
+    produced = changes is not None and not changes.empty
+    pushed = bool(changes is not None and changes.pushed)
+
+    result: dict[str, Any] = {
+        "summary": (summary or response.result_text)[:_SUMMARY_LIMIT],
+        "changed_code": produced,
+        "pushed": pushed,
+        "pull_requests": _pull_requests(response.sink_results),
+    }
+
+    if changes is not None and produced:
+        # `repo` is what the connection is configured to work, which is the
+        # only repository name this runner holds without asking a forge. Left
+        # out for a connection that works in place from a folder — the board
+        # can still show the branch.
+        branch: dict[str, Any] = {"branch": changes.branch, "files_changed": changes.files_changed}
+        repo = conn_setting(connection, "repo")
+        if repo:
+            branch["repo"] = repo
+        result["branches"] = [branch]
+
+    # ponytail: no `checks` key. Nothing in a run reports the tests or the lint
+    # it ran, so there is nothing to put in one.
+    return result
 
 
 def _match_member(assignee: str, members: list[dict[str, Any]]) -> str | None:
@@ -120,9 +235,21 @@ class _Client(Protocol):
     ) -> list[dict[str, Any]]: ...
     def claim_mention(self, notification_id: str) -> dict[str, Any]: ...
     def claim(
-        self, task_id: str, *, install_id: str | None = ..., executor: str | None = ...
+        self,
+        task_id: str,
+        *,
+        install_id: str | None = ...,
+        executor: str | None = ...,
+        mode: str | None = ...,
     ) -> dict[str, Any]: ...
-    def release(self, run_id: str, *, status: str = ..., note: str | None = ...) -> None: ...
+    def release(
+        self,
+        run_id: str,
+        *,
+        status: str = ...,
+        note: str | None = ...,
+        result: dict[str, Any] | None = ...,
+    ) -> None: ...
     def add_comment(self, task_id: str, body: str) -> dict[str, Any]: ...
     def update_task(self, task_id: str, **fields: Any) -> dict[str, Any]: ...
     def heartbeat(self, run_id: str) -> None: ...
@@ -291,6 +418,10 @@ class Issuebear(Source):
                     # The resolved name, so the board is told which environment ran
                     # the work even when the config left it to the one installed.
                     executor=maybe_executor_name(self._connection),
+                    # And what this run will actually do, so the board can say
+                    # so rather than showing what its column asked for and
+                    # leaving somebody to find out it was overridden.
+                    mode=WIRE_MODES[effective_mode(self._connection, work)],
                 )
         except AlreadyClaimed:
             # Another runner holds the lock, or an earlier crashed run still
@@ -310,15 +441,26 @@ class Issuebear(Source):
         return Claim(work_id=work.task_id, token=result.get("run_id") or "")
 
     def release(self, claim: Claim, response: Response) -> None:
-        """Release the run lock, reporting how the run went.
+        """Release the run lock, reporting how the run went and what it did.
+
+        The report (:func:`_run_result`) goes with every release this holds a
+        token for, a failed one included: a run that ended badly still changed
+        whatever it changed before it did, and that is worth knowing.
 
         A no-op when this claim carries no token — a mention claimed while this
         agent already held a working claim on the same task has no responding
         run of its own, so there is nothing to release."""
         if not claim.token:
             return
+
         status = "done" if response.status == "done" else "failed"
-        self._client.release(claim.token, status=status, note=response.result_text or None)
+
+        self._client.release(
+            claim.token,
+            status=status,
+            note=response.result_text or None,
+            result=_run_result(self._connection, response),
+        )
 
     # -- narration / decisions / finish --------------------------------------
 
@@ -482,15 +624,19 @@ class Issuebear(Source):
     def permits(self, work: WorkItem) -> frozenset[OutputKind]:
         """This source's judgement about its own work kinds: an assignment
         may report anything; a mention's session never touches the workspace,
-        so it cannot produce `changes` — and neither can a connection whose
-        `mode` is `"respond"`, whatever kind of work arrived.
+        so it cannot produce `changes` — and neither can a run that responds
+        rather than builds, whatever kind of work arrived.
+
+        Whether this run responds is :func:`effective_mode`'s answer, so a
+        connection that defers to the board is held to what the item's own
+        column asked for, and one that overrides is held to its override.
 
         `mode` folds in here rather than as a second field on the ABC:
         `permits` is this source's judgement, and mode is part of that
         judgement, not a second axis (ADR-0011).
         """
         kind_permits = _MENTION_PERMITS if work.kind == "mention" else _ASSIGNMENT_PERMITS
-        if conn_setting(self._connection, "mode", "build") == "respond":
+        if effective_mode(self._connection, work) == "respond":
             return kind_permits & _MENTION_PERMITS  # bars `changes`, same restriction as a mention
         return kind_permits
 
@@ -515,21 +661,38 @@ class Issuebear(Source):
         preamble: the agent settles the divergence in-workspace before the
         task, and the runner's final push stays plain (never forced).
 
-        The instruction document itself comes from ``work.instructions`` —
-        the board's, never this runner's own — keyed the same way the
-        connection already chooses build vs. respond: a mention always reads
-        ``respond_mention``, everything else reads ``respond_task`` or
-        ``work_task`` off the connection's ``mode``. An item carrying no
-        document for the key this run needs fails the render
+        The document itself is the board's, never this runner's own, and there
+        are two ways the board can give it. A connection that defers to the
+        board (``mode = "board"``) takes ``work.prompt`` — the prompt the
+        item's own column composed, which is the whole document — whenever the
+        column composed one. Everything else falls back to
+        ``work.instructions``, keyed the way the connection already chooses
+        build vs. respond: a mention always reads ``respond_mention``,
+        everything else reads ``respond_task`` or ``work_task``. That is what a
+        column with nothing selected gets, and what an overriding connection
+        gets whatever the column selected — the item carries both task
+        documents for exactly that reason.
+
+        Either way the document is composed from the same instruction library
+        and uses the same tag vocabulary, so everything below this — the tags,
+        the identity block, the response block, the reconcile preamble — is the
+        same work on either.
+
+        An item carrying no document for the key this run needs fails the
+        render
         (:class:`~issuebot.plugins.sources.issuebear.prompts.MissingDocument`)
         rather than launching an agent with no instructions."""
         if work.kind == "mention":
             key = "respond_mention"
-        elif conn_setting(connection, "mode", "build") == "respond":
+        elif effective_mode(connection, work) == "respond":
             key = "respond_task"
         else:
             key = "work_task"
-        document = work.instructions.get(key, "")
+
+        defers = conn_setting(connection, "mode", "board") == "board"
+        composed = work.prompt if defers and work.kind != "mention" else None
+
+        document = composed or work.instructions.get(key, "")
 
         if work.kind == "mention":
             rendered = prompts.render_mention_prompt(

@@ -546,15 +546,17 @@ class ProjectListener:
         the live state. The one snapshot every publisher receives, so `issuebot
         status` and server telemetry cannot disagree.
 
-        The published "target" (folder, else the workspace's repo) is read per
-        call rather than cached at construction, so a config reloaded under a
-        live listener publishes what it now says. `_board` stays cached."""
+        The published "target" (folder, else the workspace's repo) and "mode"
+        are read per call rather than cached at construction, so a config
+        reloaded under a live listener publishes what it now says. `_board`
+        stays cached."""
         target = self._project.folder or conn_setting(self._project, "repo") or ""
 
         return self._state.snapshot(
             name=self._project.name or "",
             board=self._board,
             target=target,
+            mode=conn_setting(self._project, "mode", "board"),
         )
 
     @property
@@ -784,6 +786,14 @@ class ProjectListener:
             else:
                 for decision in response.decisions:
                     self._source.apply(work, decision)
+
+            # What the sinks did rides back on the response, because the
+            # release is the next thing to happen to it and a source may want
+            # to report the pull request a sink opened. Attached here rather
+            # than passed alongside: `_safe_release` releases with exactly this
+            # method's return value, so this is the one value that reaches it.
+            response = replace(response, sink_results=tuple(results))
+
             self._report(work, response, results)
         except Exception:  # noqa: BLE001 — reporting is best-effort; releasing is not
             logger.warning("failed to deliver outcome for %s", work.ref, exc_info=True)

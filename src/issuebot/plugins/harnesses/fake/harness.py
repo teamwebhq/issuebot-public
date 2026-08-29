@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from issuebot.contracts import Output
@@ -78,7 +78,9 @@ class FakeHarness(Harness):
         self._writes_response = writes_response
         self._response_raw = response_raw
         self.calls: list[LaunchSpec] = []
-        self.summarize_calls: list[tuple[str, str, str | None, str, str]] = []
+        self.summarize_calls: list[
+            tuple[str, str, str | None, str, str, Mapping[str, str] | None]
+        ] = []
 
     def launch(
         self,
@@ -109,8 +111,15 @@ class FakeHarness(Harness):
         )
 
     def summarize(
-        self, diff: str, *, context: str, model: str | None, folder: str, guidance: str = ""
+        self,
+        *,
+        context: str,
+        change: str,
+        model: str | None,
+        folder: str,
+        guidance: str = "",
+        env: Mapping[str, str] | None = None,
     ) -> str:
         """Record the call and return the configured canned summary."""
-        self.summarize_calls.append((diff, context, model, folder, guidance))
+        self.summarize_calls.append((change, context, model, folder, guidance, env))
         return self._summary

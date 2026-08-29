@@ -156,7 +156,7 @@ def test_settings_asks_for_this_sources_own_keys_with_their_defaults() -> None:
     this hook asks for them — and its defaults are the settings models' own."""
     settings, changes = wizard.settings(choose_literal=_pick_default, sandboxed=False)
 
-    assert settings == {"mode": "build", "confirm": True, "done": "review"}
+    assert settings == {"mode": "board", "confirm": True, "done": "review"}
     assert changes is True
 
 

@@ -100,6 +100,15 @@ class WorkItem:
     harness: str | None = None
     model: str | None = None
 
+    # The prompt the board's column composed for this item — the whole run
+    # prompt, built from the same instruction documents and using the same tag
+    # vocabulary as `instructions` above — and what that composition lets the
+    # run do ("edit_code" or "research"). Both are None together, which is the
+    # board saying it selected nothing: a runner reading these falls back to
+    # `instructions`, which is exactly how it behaved before either existed.
+    prompt: str | None = None
+    mode: str | None = None
+
     # The board's or column's own instructions for the agent, filled into the
     # instruction document's {agent_instructions} tag.
     agent_instructions: str | None = None
@@ -129,6 +138,8 @@ class WorkItem:
             instructions=dict(payload.get("instructions") or {}),
             harness=payload.get("harness"),
             model=payload.get("model"),
+            prompt=payload.get("prompt"),
+            mode=payload.get("mode"),
             agent_instructions=payload.get("agent_instructions"),
         )
 
@@ -374,6 +385,15 @@ class Response:
     # is what makes it work on both paths; see `sandbox_protocol.RunResult`
     # for the wire crossing. Empty when the board sent no such skill.
     guidance: str = ""
+
+    # What the sinks did with this run's deliverables, attached by the
+    # controller (`runner.Listener._finish`) once they have all run. Carried
+    # here for the same reason `guidance` is: it is resolved after the run and
+    # the release needs it, so rather than making `Source.release` take a
+    # second argument every source would have to accept, the one value that
+    # already travels from the run to the release carries it. Empty until
+    # delivery has happened, and on any run that never got that far.
+    sink_results: tuple[SinkResult, ...] = ()
 
     @property
     def deliverables(self) -> list[Output]:

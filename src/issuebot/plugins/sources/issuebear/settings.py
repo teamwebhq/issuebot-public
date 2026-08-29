@@ -16,8 +16,19 @@ from pydantic import BaseModel
 # wizard hook offers its values as a menu.
 DoneMode = Literal["review", "complete"]
 
-# Whether the agent may edit the workspace at all. `Settings.mode` carries it.
-Mode = Literal["build", "respond"]
+# What this connection does with the board's work. `Settings.mode` carries it.
+# "board" defers to the item: the column the task sits in says what the run is
+# for, and this connection does that. The other two are overrides — they ignore
+# what the column asked for and always build, or always respond.
+Mode = Literal["board", "build", "respond"]
+
+# The board and this runner name the same two things differently, and the
+# crossing belongs here, on the plugin that talks to that board — core knows
+# neither vocabulary. An item's `mode` arrives in the board's words and is read
+# through `BOARD_MODES`; a claim and a telemetry entry report in the board's
+# words and are written through `WIRE_MODES`.
+BOARD_MODES: dict[str, str] = {"edit_code": "build", "research": "respond"}
+WIRE_MODES: dict[str, str] = {"build": "edit_code", "respond": "research"}
 
 # CLI and wizard vocabulary for `Settings.confirm`, which is a bool. Spelled
 # as a value rather than a `--confirm/--no-confirm` flag pair so it reads like
@@ -50,5 +61,8 @@ class Settings(BaseModel):
     # (`ask_questions`) whatever this says. Off, it plans and gets on with it.
     confirm: bool = True
 
-    # Whether the agent may edit the workspace at all: "build" or "respond".
-    mode: Mode = "build"
+    # What this connection does with the board's work: "board" to do what the
+    # item's column asks for, or "build"/"respond" to override it and always do
+    # the one thing. An item whose column asks for nothing builds, which is what
+    # every connection did before a column could ask for anything.
+    mode: Mode = "board"
