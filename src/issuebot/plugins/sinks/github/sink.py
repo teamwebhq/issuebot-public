@@ -41,7 +41,7 @@ import re
 import tempfile
 from typing import TYPE_CHECKING, ClassVar
 
-from issuebot.contracts import Changed, SinkResult
+from issuebot.contracts import Changed, PullRequestRef, SinkResult
 from issuebot.plugins.sinks.base import Sink
 from issuebot.process import REAL, Process, with_env
 from issuebot.summaries import titled
@@ -57,6 +57,17 @@ logger = logging.getLogger("issuebot")
 # Everything up to and including the host, in the two forms git writes a remote:
 # `scheme://[user@]host/` and `user@host:`. What follows is the repository path.
 _HOST = re.compile(r"^(?:[a-z][a-z0-9+.-]*://[^/]+/|[^/@]+@[^:/]+:)", re.IGNORECASE)
+
+# The number at the end of a pull request's own URL. `gh pr create` answers with
+# a URL and nothing else, and a `SinkResult` reports a number — so this is where
+# one becomes the other, in the sink that knows what a GitHub PR url looks like.
+_PR_NUMBER = re.compile(r"/pull/(\d+)/?$")
+
+
+def _pr_number(url: str) -> int | None:
+    """The pull request number ``url`` names, or ``None`` when it names none."""
+    match = _PR_NUMBER.search(url.strip())
+    return int(match.group(1)) if match is not None else None
 
 
 def _slug(url: str) -> str:
@@ -130,8 +141,8 @@ def _signed(body: str, delivery: Delivery) -> str:
     return f"{body}\n\n---\n\nOpened by **{author}**." if author else body
 
 
-def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str] | None:
-    """The branch's open pull request as ``(number, url)``, or ``None``.
+def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str, bool] | None:
+    """The branch's open pull request as ``(number, url, draft)``, or ``None``.
 
     Scoped with ``pr list --state open`` rather than ``pr view <branch>``: the
     latter also matches a closed or merged PR, so a reused branch would report
@@ -139,7 +150,9 @@ def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str] | Non
     rather than relying on a cwd.
 
     The number is kept beside the url because a second run rewrites the pull
-    request it finds, and ``gh pr edit`` is addressed by number.
+    request it finds, and ``gh pr edit`` is addressed by number. The draft flag
+    comes back with it because the step's policy decides about it — a draft this
+    run is meant to open for review has to be recognised as a draft first.
     """
     argv = [
         "gh",
@@ -152,7 +165,7 @@ def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str] | Non
         "--state",
         "open",
         "--json",
-        "number,url",
+        "number,url,isDraft",
     ]
     result = proc.run(argv)
     if not result.ok:
@@ -162,7 +175,7 @@ def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str] | Non
     # of them mean the same thing here — nothing open to write to.
     try:
         row = json.loads(result.out)[0]
-        return int(row["number"]), str(row["url"])
+        return int(row["number"]), str(row["url"]), bool(row.get("isDraft"))
     except (json.JSONDecodeError, TypeError, KeyError, IndexError, ValueError):
         return None
 
@@ -207,12 +220,46 @@ def _change(repo: str, folder: str, changes: Changes, number: int | None) -> str
     )
 
 
-def _create_pr(proc: Process, repo: str, branch: str, body: str, *, title: str) -> str | None:
-    """Open a pull request from ``branch`` and return its url, or ``None``."""
-    created = proc.run(
-        ["gh", "pr", "create", "-R", repo, "--head", branch, "--title", title, "--body", body]
-    )
+def _create_pr(
+    proc: Process, repo: str, branch: str, body: str, *, title: str, draft: bool = False
+) -> str | None:
+    """Open a pull request from ``branch`` and return its url, or ``None``.
+
+    Reviewers are never named here — see :func:`_request_reviewers` for why they
+    are asked for separately, afterwards.
+    """
+    argv = ["gh", "pr", "create", "-R", repo, "--head", branch, "--title", title, "--body", body]
+    if draft:
+        argv.append("--draft")
+
+    created = proc.run(argv)
     return created.out.strip() or None if created.ok else None
+
+
+def _mark_ready(proc: Process, repo: str, number: int) -> bool:
+    """Take pull request ``number`` out of draft. True when it took."""
+    return proc.run(["gh", "pr", "ready", str(number), "-R", repo]).ok
+
+
+def _request_reviewers(
+    proc: Process, repo: str, number: int, reviewers: tuple[str, ...]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Ask ``reviewers`` to review pull request ``number``: ``(requested, refused)``.
+
+    One call per login, and never as ``--reviewer`` on ``gh pr create``: GitHub
+    refuses the whole request over a single login that is not a collaborator, so
+    naming them at creation loses the pull request itself over a bad username,
+    and naming them all in one edit loses every review request over one. Losing
+    a review request is the cheapest of the three, so that is the one this risks.
+    """
+    requested: list[str] = []
+    refused: list[str] = []
+
+    for login in reviewers:
+        edited = proc.run(["gh", "pr", "edit", str(number), "-R", repo, "--add-reviewer", login])
+        (requested if edited.ok else refused).append(login)
+
+    return tuple(requested), tuple(refused)
 
 
 def _rewrite_pr(proc: Process, repo: str, number: int, body: str, *, title: str) -> bool:
@@ -225,6 +272,45 @@ def _rewrite_pr(proc: Process, repo: str, number: int, body: str, *, title: str)
         ["gh", "pr", "edit", str(number), "-R", repo, "--title", title, "--body", body]
     )
     return edited.ok
+
+
+def _refresh_pr(
+    proc: Process,
+    repo: str,
+    existing: tuple[int, str, bool],
+    body: str,
+    *,
+    title: str,
+    wants_draft: bool,
+    notes: list[str],
+) -> tuple[str, bool]:
+    """Bring the pull request this branch already has up to date with this run.
+
+    Returns ``(verb, draft)`` — what to call what happened, and the draft state
+    the pull request is left in. Whatever did not take is appended to ``notes``
+    rather than raised: the branch is pushed and the pull request is there to
+    read, so none of it is worth failing the delivery over.
+    """
+    number, _url, draft = existing
+
+    if _rewrite_pr(proc, repo, number, body, title=title):
+        verb = "updated PR"
+    else:
+        verb = "reused PR"
+        notes.append("description not updated")
+
+    # Promote, never demote. An early step opens a draft and a later step
+    # finishes the work and opens it for review — that pipeline is what this
+    # policy exists for. The reverse is never done: a pull request already
+    # marked ready was most likely marked ready by a person, and a run putting
+    # it back into draft would undo their decision.
+    if draft and not wants_draft:
+        if _mark_ready(proc, repo, number):
+            draft = False
+        else:
+            notes.append("could not open the draft for review")
+
+    return verb, draft
 
 
 def _describe(
@@ -346,7 +432,13 @@ class GitHubSink(Sink):
         never reached origin, or GitHub's own compare API saying the branch
         carries nothing — each comes back as an ordinary failed
         :class:`~issuebot.contracts.SinkResult` rather than opening a PR from
-        nothing."""
+        nothing.
+
+        What happens to the branch after that is the board step's decision, not
+        this sink's: ``delivery.work.pr`` says whether to open a pull request at
+        all, whether it opens as a draft, and who is asked to review it. A step
+        that wants no pull request is obeyed as a *success* — those refusals
+        above are failures, this is a choice."""
         assert isinstance(delivery.output, Changed)
         # Every `gh` call below authenticates as whatever the source lent for
         # this run (`Delivery.forge_env`) — the same identity that pushed the
@@ -392,6 +484,19 @@ class GitHubSink(Sink):
         # one is described from the whole of that PR.
         existing = _existing_pr(proc, repo, changes.branch)
 
+        policy = delivery.work.pr
+
+        # A step that asked for no pull request gets none, and that is a
+        # success: the branch is on origin deliberately, for a later step to
+        # open one from. Answered before `_describe`, because a description
+        # nobody will read still costs a whole model run to write.
+        if existing is None and not policy.create:
+            return SinkResult(
+                sink=self.name,
+                ok=True,
+                summary=f"pushed {changes.branch}; no pull request (step policy)",
+            )
+
         title, body, fallback = _describe(
             delivery.folder,
             changes,
@@ -408,24 +513,39 @@ class GitHubSink(Sink):
         notes = [f"mechanical description: {fallback}"] if fallback else []
 
         if existing is None:
-            url = _create_pr(proc, repo, changes.branch, signed, title=title)
+            url = _create_pr(proc, repo, changes.branch, signed, title=title, draft=policy.draft)
             if url is None:
                 return SinkResult(sink=self.name, ok=False, summary="could not open a pull request")
+
             verb = "opened PR"
+            number = _pr_number(url)
+            draft = policy.draft
 
         else:
-            number, url = existing
-            # A failed rewrite is not a failed delivery: the branch is pushed
-            # and the pull request is there to read. It is reported, not
-            # raised, so the reviewer knows the description is the older one.
-            if _rewrite_pr(proc, repo, number, signed, title=title):
-                verb = "updated PR"
-            else:
-                verb = "reused PR"
-                notes.append("description not updated")
+            number, url, _ = existing
+            verb, draft = _refresh_pr(
+                proc, repo, existing, signed, title=title, wants_draft=policy.draft, notes=notes
+            )
+
+        # Asked for after the pull request exists, whether this run opened it or
+        # found it, and never at creation time — see `_request_reviewers`.
+        requested: tuple[str, ...] = ()
+        if number is not None and policy.reviewers:
+            requested, refused = _request_reviewers(proc, repo, number, policy.reviewers)
+            if refused:
+                notes.append(f"no review requested from {', '.join(refused)}")
 
         # A mechanical or unwritten description says so where the person
         # reading the task comment will see it, not only in the runner's log.
         note = f"{verb} ({'; '.join(notes)})" if notes else verb
 
-        return SinkResult(sink=self.name, ok=True, summary=note, url=url)
+        # ponytail: a url whose number will not parse still reports as a
+        # delivered url, just without the structured fact. Nothing is invented
+        # from a shape this sink does not recognise.
+        pull_request = (
+            PullRequestRef(repo=repo, number=number, url=url, draft=draft, reviewers=requested)
+            if number is not None
+            else None
+        )
+
+        return SinkResult(sink=self.name, ok=True, summary=note, url=url, pull_request=pull_request)

@@ -17,6 +17,7 @@ from issuebot.contracts import (
     Claim,
     Handoff,
     NeedsInput,
+    PullRequestRef,
     Response,
     SinkResult,
     SkillRef,
@@ -191,6 +192,12 @@ def test_releasing_reports_what_the_run_did():
                 ok=True,
                 summary="opened PR",
                 url="https://github.com/acme/web/pull/7",
+                pull_request=PullRequestRef(
+                    repo="acme/web",
+                    number=7,
+                    url="https://github.com/acme/web/pull/7",
+                    draft=True,
+                ),
             ),
         ),
     )
@@ -208,8 +215,35 @@ def test_releasing_reports_what_the_run_did():
             "number": 7,
             "url": "https://github.com/acme/web/pull/7",
             "state": "open",
+            "draft": True,
         }
     ]
+
+
+def test_a_url_that_merely_looks_like_a_pull_request_is_not_reported_as_one():
+    """The board is told about a pull request when a sink says it ended at one,
+    never because the URL it reported has the shape of one. A sink is free to
+    report any URL — a deployment, a preview, a comment — and only the sink that
+    opened a pull request knows it opened one."""
+    api = FakeApi()
+    response = Response(
+        status="done",
+        changes=_pushed(),
+        outputs=[Changed(summary="deployed it")],
+        sink_results=(
+            SinkResult(
+                sink="mirror",
+                ok=True,
+                summary="mirrored the branch",
+                url="https://mirror.example.com/acme/web/pull/7",
+            ),
+        ),
+    )
+
+    _source(api).release(Claim(work_id="t1", token="r1"), response)
+
+    (result,) = api.release_results
+    assert result["pull_requests"] == []
 
 
 def test_a_branch_that_never_reached_origin_is_reported_as_unpushed():

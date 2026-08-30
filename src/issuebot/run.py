@@ -19,9 +19,17 @@ see ADR-0012.
 ``Response.outputs`` is filled in here: the agent writes its response document
 to the path handed to it as ``$ISSUEBOT_RESPONSE``, outside the workspace so it
 can never land in a commit, and ``_finish`` reads it back once the harness
-exits. A missing or unparseable document fails the run outright — it means the
-agent never finished reporting, a different state from a document that
-deliberately says ``{"outputs": []}``.
+exits. A missing document earns one resumed retry — the agent is asked again,
+in the same conversation, to write it — and only then fails the run; an
+unparseable one fails outright. Either failure means the agent never finished
+reporting, a different state from a document that deliberately says
+``{"outputs": []}``.
+
+One output is not the agent's: when git says the run committed and the agent
+reported no ``changes`` output, ``_finish`` appends one of its own. ``Changes``
+is derived from git because the agent's word is not trusted, so whether that
+work reaches a sink cannot hinge on the agent's word either — see
+:func:`_derived_changes_output`.
 """
 
 from __future__ import annotations
@@ -39,7 +47,16 @@ from typing import TYPE_CHECKING, Literal
 from issuebot import provision
 from issuebot.agent_state import AgentState
 from issuebot.config import conn_setting
-from issuebot.contracts import Delivery, Response, SinkResult, parse_outputs
+from issuebot.contracts import (
+    Answer,
+    Changed,
+    Changes,
+    Delivery,
+    Output,
+    Response,
+    SinkResult,
+    parse_outputs,
+)
 from issuebot.plugins.harnesses.base import Harness, LaunchResult, LaunchSpec
 from issuebot.plugins.workspaces.base import Prepared, Workspace
 from issuebot.process import REAL, Process, with_env
@@ -63,6 +80,16 @@ logger = logging.getLogger("issuebot")
 # "there is no read-only exception and no second output channel"), pointing
 # outside any workspace so the document can never appear in a commit.
 RESPONSE_ENV = "ISSUEBOT_RESPONSE"
+
+# What the agent is told when it exits cleanly having never written its response
+# document. Deliberately narrow: the conversation is resumed with all its work
+# already done, so the only thing left to ask for is the file itself.
+RESPONSE_NUDGE = (
+    "You exited without writing your response document. Do no further work — just write "
+    f"it now, as JSON, to the path in the ${RESPONSE_ENV} environment variable. That file "
+    "is the only channel for your answer: without it this run is reported as a failure and "
+    "everything you did is discarded."
+)
 
 # The board's skill that carries PR-writing guidance, when it sends one. Named
 # once here rather than at each of `execute`'s and the GitHub sink's call
@@ -258,9 +285,80 @@ def _classify(
     return "failed" if result.exit_code != 0 else "done"
 
 
+def _retry_response(
+    harness: Harness,
+    spec: LaunchSpec,
+    result: LaunchResult,
+    response_path: str,
+    rep: Reporter,
+    cancel: threading.Event,
+    *,
+    reference: str,
+) -> None:
+    """Give an agent that exited cleanly without its response document one more
+    turn to write it.
+
+    A run that did every bit of its work and only missed the final file would
+    otherwise be failed by :func:`_finish` and have all of it discarded, so the
+    same conversation is reopened with nothing but a nudge to write the
+    document. Bounded to a single extra launch: an agent that still writes
+    nothing fails the run exactly as before.
+
+    Only for a harness that resumes — a fresh launch would carry no memory of
+    the work and would simply redo it — and never after an abort or timeout,
+    where more agent work is the last thing wanted.
+
+    Runs purely for its side effect on ``response_path``. The original
+    ``result`` stays the one the caller finishes with: its ``session_id`` is
+    the conversation to store, and its ``result_text`` is the PR-body fallback,
+    neither of which this content-free turn can improve on.
+    """
+    session = result.session_id or spec.resume_session_id
+    if cancel.is_set() or not harness.resumes_sessions or session is None:
+        return
+
+    if Path(response_path).exists():
+        return
+
+    logger.info("no response document from %s; asking again in the same session", reference)
+    harness.launch(replace(spec, prompt=RESPONSE_NUDGE, resume_session_id=session), rep, cancel)
+
+
 # ---------------------------------------------------------------------------
 # Finishing
 # ---------------------------------------------------------------------------
+
+
+# What a synthesized `Changed` says when the agent wrote no answer to borrow a
+# summary from. Deliberately plain about where it came from: nothing the agent
+# said describes this commit, and the GitHub sink reads the diff anyway.
+DERIVED_SUMMARY = "committed changes the agent did not summarise"
+
+
+def _derived_changes_output(outputs: list[Output], changes: Changes) -> list[Output]:
+    """``outputs`` with a git-derived ``changes`` output appended when one is missing.
+
+    Exists because the two halves of "changes" have different trust levels.
+    :class:`~issuebot.contracts.Changes` is derived from git precisely because
+    the agent's word is not trusted — an agent claiming a refactor cannot move
+    ``head_sha``. But sinks are only offered the outputs the *agent* wrote, so a
+    run that committed and pushed while reporting only an ``answer``, only a
+    ``handoff``, or nothing at all would leave a branch on the forge that no
+    sink ever sees: no pull request opened, no sink result, nothing on the board
+    saying the work is sitting there. Deriving the changes from git is pointless
+    if delivering them still hinges on the agent's word, so it does not.
+
+    The agent's first ``answer`` is the closest thing to its own account of the
+    run, so that text becomes the summary; failing that, the plainly-labelled
+    fallback. Appended last, leaving the agent's own outputs in the order it
+    wrote them.
+    """
+    if changes.empty or any(o.kind == "changes" for o in outputs):
+        return outputs
+
+    answer = next((o for o in outputs if isinstance(o, Answer)), None)
+
+    return [*outputs, Changed(summary=answer.text if answer is not None else DERIVED_SUMMARY)]
 
 
 def _finish(
@@ -292,6 +390,11 @@ def _finish(
     ``proc`` erroring, git itself misbehaving — reaches this ``except`` and
     fails the run, because a ``done`` status with no ``Changes`` at all would
     be a worse answer than a plain failure.
+
+    A commit that produced real commits is then made deliverable whatever the
+    agent reported: :func:`_derived_changes_output` appends a ``changes`` output
+    when the agent wrote none, so git's own account of the run reaches a sink
+    without depending on the agent having mentioned it.
 
     ``guidance`` only ever reaches a caller past this point: it rides
     unconditionally on a ``done`` response (see ``Response.guidance``), a
@@ -337,7 +440,7 @@ def _finish(
     return Response(
         status="done",
         changes=changes,
-        outputs=outputs,
+        outputs=_derived_changes_output(outputs, changes),
         session_id=result.session_id,
         guidance=guidance,
     )
@@ -579,6 +682,12 @@ def execute(
         rep.finish(status, elapsed)
 
         if status == "done":
+            # A clean exit with no response document is worth one more ask
+            # before `_finish` throws the whole run away over the missing file.
+            _retry_response(
+                harness, spec, result, response_path, rep, cancel, reference=job.work.ref
+            )
+
             return _finish(
                 job, workspace, prepared, settings, proc, result, response_path, guidance=guidance
             )

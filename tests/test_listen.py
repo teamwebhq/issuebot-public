@@ -12,7 +12,14 @@ from typing import Any
 
 from conftest import config, connection, ctx, in_process_environment, wiring
 from issuebot.config import Config, Connection, SinkRef, save_config
-from issuebot.contracts import Changed, Claim, Handoff, Response, SinkResult
+from issuebot.contracts import (
+    Changed,
+    Claim,
+    Handoff,
+    PullRequestRef,
+    Response,
+    SinkResult,
+)
 from issuebot.plugins.environments.base import ExecutionEnvironment
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.plugins.sources.base import ConnectionConflict
@@ -413,6 +420,9 @@ def test_what_the_sinks_did_reaches_the_release() -> None:
                 ok=True,
                 summary="opened PR",
                 url="https://github.com/acme/web/pull/7",
+                pull_request=PullRequestRef(
+                    repo="acme/web", number=7, url="https://github.com/acme/web/pull/7"
+                ),
             )
 
     ex = StubEnvironment(_changed_and_handoff())
@@ -435,6 +445,7 @@ def test_what_the_sinks_did_reaches_the_release() -> None:
             "number": 7,
             "url": "https://github.com/acme/web/pull/7",
             "state": "open",
+            "draft": False,
         }
     ]
 

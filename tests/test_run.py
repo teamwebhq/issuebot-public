@@ -32,7 +32,7 @@ from conftest import (
 )
 from issuebot.agent_state import AgentState
 from issuebot.board_skills import Bundle
-from issuebot.contracts import Changed, Changes, Job, McpServer
+from issuebot.contracts import Answer, Changed, Changes, Handoff, Job, McpServer
 from issuebot.plugins.harnesses.base import LaunchResult, LaunchSpec
 from issuebot.plugins.harnesses.fake.harness import FakeHarness, write_response
 from issuebot.plugins.workspaces.base import WorkspaceProblem
@@ -210,6 +210,72 @@ def test_a_run_that_reported_no_changes_commits_under_the_bare_ref():
     _run(harness=FakeHarness(outputs=[]), workspace=workspace)
 
     assert workspace.commit_calls[0][1] == "ISS-1"
+
+
+# ---------------------------------------------------------------------------
+# Git-derived changes reach a sink whatever the agent reported
+# ---------------------------------------------------------------------------
+
+
+def _empty_workspace() -> FakeWorkspace:
+    """A workspace whose commit moved nothing — head never left base."""
+    return FakeWorkspace(
+        changes=Changes(branch="b", base_sha="a", head_sha="a", stat="", files_changed=0)
+    )
+
+
+def test_a_committing_run_that_only_answered_still_reports_its_changes():
+    """The branch exists on the forge; without a `changes` output no sink would
+    ever be offered it. The answer is the agent's own account of the run, so it
+    is what the synthesized output carries."""
+    harness = FakeHarness(outputs=[Answer(text="Rewired the gauge")])
+
+    response = _run(harness=harness)
+
+    assert [o.kind for o in response.outputs] == ["answer", "changes"]
+    changed = response.outputs[1]
+    assert changed.summary == "Rewired the gauge"
+    assert response.changes.head_sha != response.changes.base_sha
+
+
+def test_a_committing_run_that_only_handed_off_still_reports_its_changes():
+    """A handoff is a decision, not a deliverable — it coexists with the
+    synthesized `changes` rather than replacing it."""
+    harness = FakeHarness(outputs=[Handoff(assignee="sam", note="over to you")])
+
+    response = _run(harness=harness)
+
+    assert [o.kind for o in response.outputs] == ["handoff", "changes"]
+    assert [o.kind for o in response.decisions] == ["handoff"]
+
+
+def test_a_committing_run_that_reported_nothing_reports_derived_changes():
+    """An empty document is not a licence to lose the commits; the summary says
+    plainly that the agent wrote none."""
+    response = _run(harness=FakeHarness(outputs=[]))
+
+    assert [o.kind for o in response.outputs] == ["changes"]
+    assert "did not summarise" in response.outputs[0].summary
+
+
+def test_a_run_that_committed_nothing_synthesizes_no_changes():
+    """No commits, nothing to deliver — an answer stays an answer."""
+    harness = FakeHarness(outputs=[Answer(text="Nothing needed doing")])
+
+    response = _run(harness=harness, workspace=_empty_workspace())
+
+    assert [o.kind for o in response.outputs] == ["answer"]
+
+
+def test_the_agents_own_changes_output_is_left_alone():
+    """Synthesis fills a gap; it never duplicates or overwrites what the agent
+    already reported."""
+    harness = FakeHarness(outputs=[Changed(summary="Rewired the gauge")])
+
+    response = _run(harness=harness)
+
+    assert [o.kind for o in response.outputs] == ["changes"]
+    assert response.outputs[0].summary == "Rewired the gauge"
 
 
 def test_changes_are_not_derived_when_not_permitted():

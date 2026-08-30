@@ -608,7 +608,9 @@ The agent has its usual file tools and shell tools. Refer to
 
 At the end of a run, issuebot tells the board what the run did: the agent's own
 summary, whether it changed and pushed code, the branch it made (pushed or not),
-and each pull request that a sink opened. The board shows this on the task.
+and each pull request that a sink opened, with its draft state. The board shows
+this on the task. A sink reports the pull request that it opened or found;
+issuebot does not read a pull request out of a URL.
 
 ## Sinks
 
@@ -649,7 +651,12 @@ accepts only `changes` from a pushed branch. It does these steps:
 5. **Find an open pull request** — the sink looks for an open pull request for
    the branch. The sink does this step before the description, because the
    description tells the reader what the pull request contains.
-6. **Make the description** — the harness makes the pull request title and body.
+6. **Obey the step policy** — the board step says what it wants done with the
+   branch. If the step asks for no pull request, and the branch has no open
+   pull request, the sink stops here and reports a success: the branch is on
+   `origin` for a later step to use. The sink writes no description, thus it
+   does not use the harness.
+7. **Make the description** — the harness makes the pull request title and body.
    The sink tells the harness where the change is; the harness reads it. For a
    new pull request, the change is the range from the base to the head of the
    branch. For a pull request that is already open, the change is the whole
@@ -657,9 +664,20 @@ accepts only `changes` from a pushed branch. It does these steps:
    when the board sent one (see
    [Skills, plans and confirmation](#skills-plans-and-confirmation)). The
    `[github] summary_model` key sets the model.
-7. **Open or update the pull request** — if the sink found no open pull request,
-   it opens one with the `gh` CLI. If it found one, it replaces the title and
-   the body of that pull request.
+8. **Open or update the pull request** — if the sink found no open pull request,
+   it opens one with `gh pr create`. When the step asks for a draft, the sink
+   runs `gh pr create --draft`. If the sink found an open pull request, it
+   replaces the title and the body of that pull request.
+9. **Open a draft for review** — if the pull request is a draft, and the step
+   does not ask for a draft, the sink makes it ready with `gh pr ready`. The
+   sink never does the opposite. A pull request that is ready stays ready,
+   because a person can make it ready.
+10. **Ask for the reviews** — the sink asks for each reviewer of the step with a
+    separate `gh pr edit --add-reviewer` command. It never gives the reviewers
+    to `gh pr create`: one name that is not a collaborator makes the full
+    command fail, and the loss of the pull request is worse than the loss of a
+    review request. If a request fails, the delivery is still a success, and
+    the report gives the name.
 
 **Each run writes the whole description again.** A second run on the same
 branch describes the pull request as it then is. This keeps the description

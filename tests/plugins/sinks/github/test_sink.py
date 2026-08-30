@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 
 from conftest import completed, sandbox_connection, work
-from issuebot.contracts import Changed, Changes, Delivery, Response, SinkResult
+from issuebot.contracts import (
+    Changed,
+    Changes,
+    Delivery,
+    PrPolicy,
+    PullRequestRef,
+    Response,
+    SinkResult,
+)
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.plugins.sinks.github.sink import GitHubSink, _slug
 from issuebot.process import RecordingProcess
@@ -40,9 +48,10 @@ def _delivery(
     ref: str = "ISS-1",
     guidance: str = "",
     forge_env: dict[str, str] | None = None,
+    pr: PrPolicy | None = None,
 ) -> Delivery:
     return Delivery(
-        work=work(reference=ref),
+        work=work(reference=ref, pr=pr),
         output=Changed(summary=summary),
         changes=_changes() if changes is _DEFAULT_CHANGES else changes,  # type: ignore[arg-type]
         repo=repo,
@@ -229,16 +238,13 @@ def test_a_repo_url_naming_no_repository_is_refused_not_guessed_at() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _with_open_pr(number: int = 4, **replies: object) -> RecordingProcess:
+def _with_open_pr(number: int = 4, *, draft: bool = False, **replies: object) -> RecordingProcess:
     """A happy process whose branch already carries open pull request ``number``."""
-    return _happy(
-        **{
-            "gh pr list": completed(
-                out=f'[{{"number": {number}, "url": "https://github.com/o/r/pull/{number}"}}]'
-            ),
-            **replies,
-        }
+    row = (
+        f'{{"number": {number}, "url": "https://github.com/o/r/pull/{number}", '
+        f'"isDraft": {str(draft).lower()}}}'
     )
+    return _happy(**{"gh pr list": completed(out=f"[{row}]"), **replies})
 
 
 def test_a_second_run_rewrites_the_pull_request_it_finds() -> None:
@@ -585,5 +591,119 @@ def test_a_required_sink_does_not_fail_a_successful_clone_connection():
             ok=True,
             summary="opened PR (mechanical description: no summarizer harness configured)",
             url="https://github.com/o/r/pull/9",
+            pull_request=PullRequestRef(repo="o/r", number=9, url="https://github.com/o/r/pull/9"),
         )
     ]
+
+
+# ---------------------------------------------------------------------------
+# The step's own pull-request policy
+# ---------------------------------------------------------------------------
+
+
+def test_a_step_that_wants_no_pull_request_leaves_the_branch_for_a_later_one() -> None:
+    """A branch and no pull request is what this step asked for, so it is a
+    success — and a visible one: the summary names the branch a later step is
+    meant to pick up. Writing a description nobody will read would cost a whole
+    model run, so none is written."""
+    proc = _happy()
+    harness = FakeHarness(summary="Add the widget")
+
+    result = GitHubSink(harness=harness, proc=proc).deliver(_delivery(pr=PrPolicy(create=False)))
+
+    assert result.ok
+    assert result.pull_request is None
+    assert "issuebot/ISS-1" in result.summary
+    assert harness.summarize_calls == []
+    assert not any(c[:3] == ["gh", "pr", "create"] for c in proc.calls)
+
+
+def test_a_step_that_wants_a_draft_opens_one() -> None:
+    proc = _happy()
+
+    result = GitHubSink(proc=proc).deliver(_delivery(pr=PrPolicy(draft=True)))
+
+    assert result.ok
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    assert "--draft" in create
+    assert result.pull_request == PullRequestRef(
+        repo="o/r", number=9, url="https://github.com/o/r/pull/9", draft=True
+    )
+
+
+def test_a_draft_is_opened_for_review_once_a_step_no_longer_wants_one() -> None:
+    """The pipeline this policy exists for: an early step opens a draft, a later
+    step finishes the work and puts it in front of a reviewer."""
+    proc = _with_open_pr(draft=True)
+
+    result = GitHubSink(proc=proc).deliver(_delivery(pr=PrPolicy(draft=False)))
+
+    assert result.ok
+    assert ["gh", "pr", "ready", "4", "-R", "o/r"] in proc.calls
+    assert result.pull_request is not None
+    assert result.pull_request.draft is False
+
+
+def test_a_pull_request_open_for_review_is_never_put_back_into_draft() -> None:
+    """A person may have marked it ready deliberately, and no run undoes that —
+    the promotion is one-way."""
+    proc = _with_open_pr(draft=False)
+
+    result = GitHubSink(proc=proc).deliver(_delivery(pr=PrPolicy(draft=True)))
+
+    assert result.ok
+    assert not any(c[:3] == ["gh", "pr", "ready"] for c in proc.calls)
+    assert not any("--draft" in c or "--undo" in c for c in proc.calls)
+    assert result.pull_request is not None
+    assert result.pull_request.draft is False
+
+
+def test_reviewers_are_requested_after_the_pull_request_exists() -> None:
+    """Never as `--reviewer` on the create: GitHub refuses the whole creation
+    over one login that is not a collaborator, and losing the pull request is
+    far worse than losing the review request."""
+    proc = _happy()
+
+    result = GitHubSink(proc=proc).deliver(_delivery(pr=PrPolicy(reviewers=("ada", "grace"))))
+
+    assert result.ok
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    assert "--reviewer" not in create
+    assert "--add-reviewer" not in create
+
+    asked = [c for c in proc.calls if "--add-reviewer" in c]
+    assert [c[c.index("--add-reviewer") + 1] for c in asked] == ["ada", "grace"]
+    assert all(c[:4] == ["gh", "pr", "edit", "9"] for c in asked)
+    assert proc.calls.index(create) < proc.calls.index(asked[0])
+
+    assert result.pull_request is not None
+    assert result.pull_request.reviewers == ("ada", "grace")
+
+
+def test_a_reviewer_that_cannot_be_requested_does_not_cost_the_pull_request() -> None:
+    """A login that is not a collaborator loses its own review request and
+    nothing else — and the result says so."""
+    proc = _happy(**{"--add-reviewer stranger": completed(code=1, err="gh: not a collaborator")})
+
+    result = GitHubSink(proc=proc).deliver(_delivery(pr=PrPolicy(reviewers=("ada", "stranger"))))
+
+    assert result.ok
+    assert "stranger" in result.summary
+    assert result.pull_request is not None
+    assert result.pull_request.url == "https://github.com/o/r/pull/9"
+    assert result.pull_request.reviewers == ("ada",)
+
+
+def test_the_default_policy_is_exactly_what_every_run_did_before() -> None:
+    """A board that asked for nothing: a pull request, not a draft, nobody
+    asked to review it."""
+    proc = _happy()
+
+    result = GitHubSink(proc=proc).deliver(_delivery())
+
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    assert "--draft" not in create
+    assert not any("--add-reviewer" in c for c in proc.calls)
+    assert result.pull_request == PullRequestRef(
+        repo="o/r", number=9, url="https://github.com/o/r/pull/9", draft=False
+    )

@@ -6,7 +6,6 @@ work item, built on top of the thin REST client in ``client.py``.
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from typing import Any, ClassVar, Protocol
 
@@ -54,11 +53,6 @@ _MENTION_PERMITS: frozenset[OutputKind] = frozenset({"answer", "needs_input", "h
 # here, where losing the tail of a summary is all it costs.
 _SUMMARY_LIMIT = 2000
 
-# The shape of a pull request's own URL on a forge: owner, repository, number.
-# A sink reports whatever URL it produced, and only the ones that look like
-# this are a pull request the board can be told a number for.
-_PR_URL = re.compile(r"/([^/]+/[^/]+)/pull/(\d+)")
-
 
 def effective_mode(connection: Connection, work: WorkItem) -> str:
     """``"build"`` or ``"respond"``: what this run will actually do.
@@ -83,26 +77,27 @@ def effective_mode(connection: Connection, work: WorkItem) -> str:
 def _pull_requests(results: tuple[SinkResult, ...]) -> list[dict[str, Any]]:
     """The pull requests this run's sinks opened, in the board's own terms.
 
-    Read off the URLs the sinks reported rather than from anything they say
-    about themselves: a sink is free to describe its work however it likes, and
-    a URL shaped like a pull request is the one part of that this source can
-    turn into a repository and a number. Anything else a sink produced — a
-    deployment, a comment — is not a pull request and is left out.
+    Read off what each sink says it ended at (`SinkResult.pull_request`), which
+    the sink filled in because it is the layer that knows a pull request when it
+    opens one. Anything else a sink produced — a deployment, a comment, a URL
+    that merely looks like a pull request — carries no such fact and is left out.
 
-    Every one of these was opened by the run that is releasing, so ``open`` is
-    the state each is in as this runner last saw it.
+    Every one of these was opened or updated by the run that is releasing, so
+    ``open`` is the state each is in as this runner last saw it. ``draft`` says
+    whether it is open for review yet, which is the step's own decision.
     """
     found: list[dict[str, Any]] = []
 
     for result in results:
-        match = _PR_URL.search(result.url or "") if result.ok else None
-        if match is not None:
+        pr = result.pull_request if result.ok else None
+        if pr is not None:
             found.append(
                 {
-                    "repo": match.group(1),
-                    "number": int(match.group(2)),
-                    "url": result.url,
+                    "repo": pr.repo,
+                    "number": pr.number,
+                    "url": pr.url,
                     "state": "open",
+                    "draft": pr.draft,
                 }
             )
 

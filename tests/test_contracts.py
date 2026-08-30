@@ -14,6 +14,7 @@ from issuebot.contracts import (
     Changes,
     Handoff,
     NeedsInput,
+    PrPolicy,
     Response,
     WorkItem,
     parse_outputs,
@@ -58,6 +59,25 @@ def test_from_api_reads_the_harness_model_and_agent_instructions():
     assert item.harness == "codex"
     assert item.model == "gpt-5"
     assert item.agent_instructions == "Run the checks."
+
+
+def test_from_api_reads_the_steps_pull_request_policy():
+    """The board's step says what to do with the branch this run pushes."""
+    item = WorkItem.from_api(
+        {
+            "task_id": "t1",
+            "pr": {"create": True, "draft": True, "reviewers": ["ada", "grace"]},
+        }
+    )
+    assert item.pr.create is True
+    assert item.pr.draft is True
+    assert item.pr.reviewers == ("ada", "grace")
+
+
+def test_a_step_that_sent_no_policy_gets_the_one_every_run_had_before():
+    """Open a pull request, not a draft, request nobody."""
+    item = WorkItem.from_api({"task_id": "t1"})
+    assert item.pr == PrPolicy(create=True, draft=False, reviewers=())
 
 
 def test_an_item_with_neither_has_empty_defaults():

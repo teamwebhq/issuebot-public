@@ -214,6 +214,11 @@ def is_merged(folder: str, branch: str, *, proc: Process = REAL) -> bool:
     return bool(g.git("branch", "--merged", g.default_branch(), "--list", branch).out.strip())
 
 
+# What `gh` says when the branch simply has no pull request yet — the expected
+# answer during branch resolution, not a fault worth a warning.
+_NO_PR = "no pull requests found"
+
+
 def pr_merged(folder: str, branch: str, *, proc: Process = REAL) -> bool:
     """True when the branch's GitHub PR is merged, per ``gh``.
 
@@ -230,7 +235,14 @@ def pr_merged(folder: str, branch: str, *, proc: Process = REAL) -> bool:
         # nothing to say why. One line so that at least it's visible; whether
         # it was a missing binary, a missing PR, or a missing login is in
         # `r.message`, which is whatever `gh` itself said.
-        logger.warning("gh pr view %s could not be answered: %s", branch, r.message)
+        #
+        # Except for the one failure that is not a failure at all: branch
+        # resolution asks this of every candidate, and a branch with no pull
+        # request is the ordinary answer for a task starting work. Warning on
+        # it trained the eye to skip the line that matters, so it goes to
+        # debug and the genuinely broken cases keep the warning.
+        level = logging.DEBUG if _NO_PR in r.message.lower() else logging.WARNING
+        logger.log(level, "gh pr view %s could not be answered: %s", branch, r.message)
         return False
     return r.out.strip() == "MERGED"
 

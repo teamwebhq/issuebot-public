@@ -34,7 +34,7 @@ from issuebot import plugins, release, runner
 from issuebot.board_skills import Bundle
 from issuebot.config import Config, Connection, source_plugin
 from issuebot.context import RunnerContext
-from issuebot.contracts import Changes, McpServer, SkillRef, WorkItem
+from issuebot.contracts import Changes, McpServer, PrPolicy, SkillRef, WorkItem
 from issuebot.plugins.sources.base import Source
 from issuebot.plugins.workspaces.base import Prepared, Workspace, WorkspaceProblem
 from issuebot.process import REAL, Completed, Process, RecordingProcess
@@ -80,6 +80,7 @@ def work(
     prompt: str | None = None,
     mode: str | None = None,
     agent_instructions: str | None = None,
+    pr: PrPolicy | None = None,
 ) -> WorkItem:
     """A work item, with the fields a test cares about and defaults for the rest.
 
@@ -104,6 +105,7 @@ def work(
         prompt=prompt,
         mode=mode,
         agent_instructions=agent_instructions,
+        pr=PrPolicy() if pr is None else pr,
     )
 
 

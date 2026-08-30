@@ -42,6 +42,50 @@ class SkillRef:
 
 
 @dataclass(frozen=True)
+class PrPolicy:
+    """What the board's step wants done with this run's pushed branch.
+
+    One step of a board's pipeline opens a draft for a later step to finish;
+    another finishes the work and opens it for review; another produces a branch
+    on purpose and no pull request at all. That is the board's decision, not the
+    runner's, so it arrives with the work item and a sink obeys it.
+
+    The default is what every run did before a step could ask for anything: open
+    a pull request, not a draft, request nobody.
+    """
+
+    create: bool = True
+    draft: bool = False
+
+    # GitHub logins, already resolved by the board. Reviewer identity is the
+    # board's to map — it holds the link between a board member and their forge
+    # account — so issuebot never turns a board user into a GitHub login itself,
+    # exactly as it never picks the harness in `harness`/`model` below.
+    reviewers: tuple[str, ...] = ()
+
+
+def _pr_policy(payload: object) -> PrPolicy:
+    """One step's pull-request policy from its wire object, or the default.
+
+    Read leniently, like the rest of a work item: a step that sent no ``pr`` at
+    all, and one that sent only part of it, both get the defaults for whatever
+    they left out rather than failing the item."""
+    if not isinstance(payload, Mapping):
+        return PrPolicy()
+
+    # A step that sent something other than a list of logins is read as having
+    # named nobody, the same as one that named nobody.
+    reviewers = payload.get("reviewers")
+    logins = tuple(str(login) for login in reviewers) if isinstance(reviewers, list | tuple) else ()
+
+    return PrPolicy(
+        create=bool(payload.get("create", True)),
+        draft=bool(payload.get("draft", False)),
+        reviewers=logins,
+    )
+
+
+@dataclass(frozen=True)
 class WorkItem:
     """A task assigned to this agent, or a mention of it on a task.
 
@@ -113,6 +157,11 @@ class WorkItem:
     # instruction document's {agent_instructions} tag.
     agent_instructions: str | None = None
 
+    # What this step wants done with the branch the run pushes. A step that
+    # said nothing gets the default policy, which is what every run did before
+    # steps could ask.
+    pr: PrPolicy = field(default_factory=PrPolicy)
+
     @classmethod
     def from_api(cls, payload: dict[str, Any]) -> WorkItem:
         """Build from a work-list payload, ignoring fields we don't model."""
@@ -141,6 +190,7 @@ class WorkItem:
             prompt=payload.get("prompt"),
             mode=payload.get("mode"),
             agent_instructions=payload.get("agent_instructions"),
+            pr=_pr_policy(payload.get("pr")),
         )
 
     @property
@@ -459,13 +509,46 @@ class Delivery:
 
 
 @dataclass(frozen=True)
+class PullRequestRef:
+    """The pull request a delivery ended at, as the forge itself names it.
+
+    The sink that opened or found it fills this in, because it is the one layer
+    that knows what a pull request on its forge looks like. Everything above it
+    reads the fields.
+    """
+
+    repo: str
+    number: int
+    url: str
+    draft: bool = False
+
+    # The GitHub logins actually requested for review — not the ones asked for.
+    # A review request is best effort (a login that is not a collaborator is
+    # refused), so this lists what took.
+    reviewers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class SinkResult:
-    """What a sink did, in terms the source can report without understanding it."""
+    """What a sink did, in terms the source can report without understanding it.
+
+    ``pull_request`` names one forge concept in an otherwise sink-neutral
+    contract, and it earns the exception: the source already understands pull
+    requests specifically — it reports them to the board as a repository and a
+    number — it just used to get there by pattern-matching ``url``. That could
+    not say whether the pull request was a draft or who was asked to review it,
+    and it read any other sink's URL that happened to look like one as a pull
+    request. Being explicit is honest where being implicit was fragile.
+    """
 
     sink: str
     ok: bool
     summary: str  # "opened PR", "deployed", "could not reach Netlify"
     url: str | None = None
+
+    # The pull request this delivery ended at, when it ended at one. None for a
+    # sink that opens none, and for a delivery whose step asked for none.
+    pull_request: PullRequestRef | None = None
 
 
 @dataclass(frozen=True)
