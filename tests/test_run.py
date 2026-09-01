@@ -27,6 +27,7 @@ from conftest import (
     RecordingReporter,
     connection,
     ctx,
+    source_table,
     wiring,
     work,
 )
@@ -36,9 +37,9 @@ from issuebot.contracts import Answer, Changed, Changes, Handoff, Job, McpServer
 from issuebot.plugins.harnesses.base import LaunchResult, LaunchSpec
 from issuebot.plugins.harnesses.fake.harness import FakeHarness, write_response
 from issuebot.plugins.workspaces.base import WorkspaceProblem
+from issuebot.process import RecordingProcess
 from issuebot.provision import ProvisionResult
 from issuebot.run import RESPONSE_ENV, execute
-from issuebot.runner import job_for
 
 ALL_PERMITS = frozenset({"changes", "answer", "needs_input", "handoff"})
 
@@ -72,11 +73,16 @@ def _run(
     source=None,
     state=None,
     heartbeat_interval=0,
+    plugin_settings=None,
     **overrides,
 ):
     """Call `execute` over a doubled wiring, with test-friendly defaults for
     everything not under test. The heartbeat interval and live state travel on
-    the wiring's context, the way a listener's do."""
+    the wiring's context, the way a listener's do.
+
+    `plugin_settings` adds to the context's default table rather than replacing
+    it, so a test that gives one harness a `command` still leaves the source
+    its own endpoints."""
     w = wiring(
         connection(),
         harness=harness or FakeHarness(),
@@ -87,7 +93,11 @@ def _run(
         # and `heartbeat`/`prompt` when their guards are open), which only a
         # `Source` implements.
         source=source if source is not None else FakeSource(),
-        context=ctx(state=state, heartbeat_interval=heartbeat_interval),
+        context=ctx(
+            state=state,
+            heartbeat_interval=heartbeat_interval,
+            plugin_settings={**source_table(), **(plugin_settings or {})},
+        ),
     )
     kwargs: dict = dict(reporter=RecordingReporter())
     kwargs.update(overrides)
@@ -878,27 +888,63 @@ def test_a_diverged_repo_runs_with_the_reconcile_preamble(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The item's harness is a request, not an order (`job_for`)
+# The board's harness overrides the install's default
 # ---------------------------------------------------------------------------
 
 
-def test_the_items_harness_is_used_silently_when_it_matches_this_install(caplog):
-    """This install's only harness is named `fake` (`wiring()`'s default). A
-    request for exactly that harness is unremarkable and logs no mismatch."""
-    job_for(work(harness="fake"), wiring())
+def test_the_board_can_name_a_harness_the_install_did_not_configure():
+    """This install runs `fake`; the board asks for `claude`. The board wins,
+    and the harness it named is built with the `command` this install set for
+    it -- so the launch spawns that executable, not the install's own."""
+    proc = RecordingProcess()
 
-    assert "requested harness" not in caplog.text
+    _run(
+        _job(work=work(harness="claude")),
+        plugin_settings={"claude": {"command": "/opt/bin/claude-x"}},
+        proc=proc,
+    )
+
+    assert [call[0] for call in proc.calls] == ["/opt/bin/claude-x"]
 
 
-def test_the_items_harness_is_requested_and_falls_back_when_absent(caplog):
-    """A board asking for a harness this install has not configured (`codex`,
-    while this install runs `fake`) never fails the run over it -- it falls
-    back to the install's own default and says so once, naming both, so the
-    mismatch is diagnosable from the log rather than silently ignored."""
-    job_for(work(harness="codex"), wiring())
+def test_the_install_runs_the_work_when_the_board_names_no_harness():
+    """Silence from the board leaves the install's own harness in charge --
+    the very instance the wiring holds, never a rebuilt copy of it."""
+    harness = FakeHarness()
 
-    assert "codex" in caplog.text
+    response = _run(harness=harness)
+
+    assert response.status == "done"
+    assert len(harness.calls) == 1
+
+
+@pytest.mark.parametrize("wanted", ["nosuch-harness", "codex"])
+def test_a_harness_this_install_cannot_run_falls_back_to_the_installs_own(wanted, caplog):
+    """A board can ask for a harness that is unknown here, or one this install
+    refuses to run (`codex` gets none of the board's skills). Neither fails the
+    run: the install's own harness does the work, and the log names both."""
+    harness = FakeHarness()
+
+    response = _run(_job(work=work(harness=wanted)), harness=harness)
+
+    assert response.status == "done"
+    assert len(harness.calls) == 1
+    assert wanted in caplog.text
     assert "fake" in caplog.text
+
+
+def test_an_overridden_harness_launches_without_the_stored_session():
+    """The stored session id belongs to the install's harness -- it means
+    nothing to the one the board named, so an overridden launch starts fresh."""
+    proc = RecordingProcess()
+
+    _run(
+        _job(work=work(harness="claude"), resume_session_id="sess-1"),
+        plugin_settings={"claude": {"command": "claude"}},
+        proc=proc,
+    )
+
+    assert "--resume" not in proc.calls[0]
 
 
 def test_the_items_model_reaches_the_launch_unmatched():

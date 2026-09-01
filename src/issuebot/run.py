@@ -44,9 +44,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from issuebot import provision
+from issuebot import plugins, provision
 from issuebot.agent_state import AgentState
-from issuebot.config import conn_setting
+from issuebot.config import conn_setting, harness_named
 from issuebot.contracts import (
     Answer,
     Changed,
@@ -58,6 +58,7 @@ from issuebot.contracts import (
     parse_outputs,
 )
 from issuebot.plugins.harnesses.base import Harness, LaunchResult, LaunchSpec
+from issuebot.plugins.sources.base import ForgeAuth
 from issuebot.plugins.workspaces.base import Prepared, Workspace
 from issuebot.process import REAL, Process, with_env
 from issuebot.reporter import ConsoleReporter, Reporter
@@ -523,6 +524,89 @@ def required_failed(results: list[SinkResult], sinks: Sequence[tuple[SinkRef, Si
 
 
 # ---------------------------------------------------------------------------
+# Forge credentials
+# ---------------------------------------------------------------------------
+
+
+def forge_env(source: Source, work: WorkItem) -> Mapping[str, str]:
+    """What this item's git/`gh` calls should authenticate and identify as.
+
+    A capability, not part of the axis: a source that holds credentials of its
+    own (a board with a GitHub App installed) lends a short-lived one for this
+    item, so the work is attributed to that app rather than to whichever
+    person's personal token is on the machine. One that does not — or that has
+    nothing to lend for this item — leaves the run using the machine's own
+    credential.
+
+    Asked once as the job is built, so the controller and a sandbox worker
+    (which rebuilds the job through this same function) each borrow their own,
+    and asked again through :func:`refreshed_forge_env` before the steps that
+    need a live token.
+    """
+    return source.forge_env(work) if isinstance(source, ForgeAuth) else {}
+
+
+def harness_for_work(work: WorkItem, wiring: Wiring, *, proc: Process = REAL) -> Harness:
+    """Which harness runs this item: the one the board asked for, else the one
+    this install configured.
+
+    The install's harness is the default, not the verdict — a board (or one of
+    its columns) that names a different installed harness gets it, built here
+    from that harness's own settings table (`ctx.plugin_settings`, where its
+    `command` override lives). Resolved at launch rather than at wiring time
+    because the choice belongs to the item, and no item exists when a
+    connection is wired.
+
+    A request this install cannot honour — an unknown harness, one this build
+    refuses (`codex`), one whose plugin has no implementation — never fails the
+    run: a preference set on a machine the board cannot see falls back to the
+    install's own harness, logged once naming both and why.
+
+    Lives here rather than in :mod:`issuebot.runner` because `runner` imports
+    this module, exactly as :func:`forge_env` does.
+    """
+    installed = wiring.harness
+    wanted = work.harness
+
+    # Nothing asked for, or asked for what is already running: the wiring's own
+    # instance answers. Never rebuilt — a test injects its harness there, and a
+    # copy would silently drop whatever that instance was set up to do.
+    if wanted is None or wanted == installed.name:
+        return installed
+
+    try:
+        return harness_named(wanted, wiring.ctx.plugin_settings, proc=proc)
+    except (plugins.UnknownPlugin, TypeError) as exc:
+        logger.warning(
+            "%s requested harness '%s', but this install cannot run it (%s); using '%s'",
+            work.ref,
+            wanted,
+            exc,
+            installed.name,
+        )
+        return installed
+
+
+def refreshed_forge_env(source: Source, job: Job) -> Mapping[str, str]:
+    """The job's forge credentials, borrowed again for a step about to run.
+
+    A lent token lives about an hour, and an agent can work for longer — so the
+    one borrowed as the job was built may already be dead by the time there is
+    something to push or a pull request to open. The board caches per
+    (installation, repo) and renews shortly before expiry, so asking again is
+    nearly free and never hands back a nearly-dead token.
+
+    A failed borrow falls back to what the run started with: a token that may
+    still be valid beats a delivery that certainly fails. Nothing lent at the
+    start means there is nothing to renew, and no board call worth making.
+    """
+    if not job.forge_env:
+        return {}
+
+    return forge_env(source, job.work) or job.forge_env
+
+
+# ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
 
@@ -558,7 +642,6 @@ def execute(
     a local run and a sandbox run identically and session persistence is not
     duplicated between them.
     """
-    harness = wiring.harness
     workspace = wiring.workspace
     connection = wiring.connection
     settings = wiring.workspace_settings
@@ -576,6 +659,11 @@ def execute(
     # this exists to stop using. `with_env` returns `proc` untouched when
     # nothing was lent.
     proc = with_env(proc, job.forge_env)
+
+    # Which harness does the work is the item's call, not the install's — and
+    # it is decided after the credentials above, so a harness spawned here runs
+    # with the same lent identity as everything else in the run.
+    harness = harness_for_work(job.work, wiring, proc=proc)
 
     ready = _prepare(job, workspace, connection, settings, proc, rep)
     if isinstance(ready, Response):
@@ -614,7 +702,14 @@ def execute(
         spec = LaunchSpec(
             prompt=prompt,
             folder=prepared.folder,
-            resume_session_id=job.resume_session_id,
+            # A stored session belongs to the harness that started it: the
+            # store keys by task id alone, so a session id means nothing to a
+            # harness the board named over this install's own. An overridden
+            # run therefore starts fresh.
+            # ponytail: dropped rather than kept per harness — key the session
+            # store by (task, harness) when a board switches harness mid-task
+            # often enough for the lost context to hurt.
+            resume_session_id=job.resume_session_id if harness is wiring.harness else None,
             env={**job.env, **job.forge_env, **prov.env, RESPONSE_ENV: response_path},
             mcp_servers=prov.mcp_servers + [s.to_fragment() for s in job.mcp_servers],
             plugin_dirs=prov.plugin_dirs + ([bundle.plugin_dir] if bundle.plugin_dir else []),
@@ -688,8 +783,21 @@ def execute(
                 harness, spec, result, response_path, rep, cancel, reference=job.work.ref
             )
 
+            # The commit and push happen after the agent, which may have run
+            # for longer than a lent token lives — so borrow again and layer
+            # the fresh answer over the one applied above (an outer overlay
+            # wins over an inner one; an empty one adds no layer at all).
+            pushing = with_env(proc, refreshed_forge_env(source, job))
+
             return _finish(
-                job, workspace, prepared, settings, proc, result, response_path, guidance=guidance
+                job,
+                workspace,
+                prepared,
+                settings,
+                pushing,
+                result,
+                response_path,
+                guidance=guidance,
             )
 
         return Response(status=status, result_text=status, session_id=result.session_id)

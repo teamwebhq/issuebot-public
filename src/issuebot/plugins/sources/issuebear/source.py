@@ -350,17 +350,31 @@ class Issuebear(Source):
     # -- discover / claim / release -----------------------------------------
 
     def poll(self, *, timeout: int) -> list[WorkItem]:
-        """The work outstanding on this connection's board: tasks and mentions.
+        """The work outstanding on this connection's board: tasks and mentions,
+        oldest first.
 
         Both lists are pure reads, so this answers the same items again until
         something claims them. The tasks read carries the ``timeout`` — it is
         the one that parks on the board's wake channel — and the mentions read
         then drains what is outstanding without waiting a second time.
+
+        The two answers are then merged onto one clock. Each list is oldest
+        first on its own, so working them one after the other would put every
+        assigned task ahead of a mention that has waited far longer. The
+        listener works this list in order, so the merge is what makes the
+        oldest work the next work, whichever list it came from.
         """
         tasks = self._client.get_tasks(board_id=self._board, wait=timeout)
         mentions = self._client.get_mentions(board_id=self._board, wait=0)
 
-        return self._items(tasks + mentions)
+        # Both lists' timestamps are serialized from the same board model, so
+        # comparing the ISO strings orders them without parsing any dates.
+        # A board too old to send `queued_at` sorts every item under "", and a
+        # stable sort then leaves exactly the order it sent: tasks, then
+        # mentions.
+        work = sorted(tasks + mentions, key=lambda payload: payload.get("queued_at") or "")
+
+        return self._items(work)
 
     def _items(self, payloads: list[dict[str, Any]]) -> list[WorkItem]:
         """Parse a board work list, scoped to this connection's board.

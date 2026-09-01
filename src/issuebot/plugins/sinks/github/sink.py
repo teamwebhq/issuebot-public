@@ -64,6 +64,22 @@ _HOST = re.compile(r"^(?:[a-z][a-z0-9+.-]*://[^/]+/|[^/@]+@[^:/]+:)", re.IGNOREC
 _PR_NUMBER = re.compile(r"/pull/(\d+)/?$")
 
 
+# The line a summary labels its title with, and the label a model often puts in
+# front of the body under it. Taking the *first* line as the title assumed a
+# model never says anything before answering; it does — a note about reading the
+# diff became a PR title (ISS-231) — so the title is found by its label instead.
+#
+# What the label is allowed to wear: markdown heading marks, bullets, quoting
+# and bold around the word, either `:` or `-` after it, any case.
+_TITLE_LINE = re.compile(r"^[\s>#*_-]*title[\s*_]*[:-]\s*(.*)$", re.IGNORECASE)
+_BODY_LABEL = re.compile(r"^[\s>#*_-]*(?:description|body)[\s*_]*[:-]\s*(.*)$", re.IGNORECASE)
+
+# What a model wraps a labelled line in. Stripped from both ends of what the
+# label captured, so `**Title:** Add the widget` and `**Title: Add the widget**`
+# both come out as the title itself.
+_DECORATION = " \t*_`#"
+
+
 def _pr_number(url: str) -> int | None:
     """The pull request number ``url`` names, or ``None`` when it names none."""
     match = _PR_NUMBER.search(url.strip())
@@ -313,6 +329,40 @@ def _refresh_pr(
     return verb, draft
 
 
+def _split_summary(text: str) -> tuple[str, str]:
+    """A summarizer's answer as ``(title, body)``, both empty when it labelled
+    no title.
+
+    The contract the harness prompts for is a line labelling the title, then
+    the markdown description under it. Scanning for that label rather than
+    reading the first line is the whole point: whatever the model wrote before
+    it — a note to itself about how much of the diff it read — is preamble, and
+    preamble is not a title.
+
+    A body the model labelled in turn (``Description:``, ``Body:``) keeps what
+    that line said and loses the label, which is scaffolding rather than prose.
+    """
+    lines = text.splitlines()
+
+    for index, line in enumerate(lines):
+        found = _TITLE_LINE.match(line)
+        if found is None:
+            continue
+
+        rest = lines[index + 1 :]
+
+        # Only the line directly under the title can be the body's own label;
+        # further down, `Body:` is just something the description says.
+        if rest:
+            labelled = _BODY_LABEL.match(rest[0])
+            if labelled is not None:
+                rest[0] = labelled.group(1)
+
+        return found.group(1).strip(_DECORATION), "\n".join(rest).strip()
+
+    return "", ""
+
+
 def _describe(
     folder: str,
     changes: Changes,
@@ -372,15 +422,18 @@ def _describe(
             )
 
         else:
-            title, _, body = text.partition("\n")
-            if title.strip():
-                return titled(ref, title), (body.strip() or summary), ""
+            title, body = _split_summary(text)
+            if title:
+                return titled(ref, title), (body or summary), ""
 
-            # The call worked but gave back nothing usable. The mechanical
-            # description below still opens the PR; it must not do so silently.
-            reason = "summary came back unusable"
+            # The call worked but gave back nothing usable: no text at all, or
+            # text that never labelled its title — and an answer that did not
+            # say which line is the title has no line that can be trusted to
+            # be one. The mechanical description below still opens the PR; it
+            # must not do so silently.
+            reason = "summary labelled no title" if text else "summary came back unusable"
             logger.warning(
-                "PR summary for %s came back unusable; using a mechanical description", ref
+                "PR summary for %s is unusable (%s); using a mechanical description", ref, reason
             )
 
     mechanical_title = summary.strip().splitlines()[0] if summary.strip() else ref

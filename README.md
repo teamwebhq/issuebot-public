@@ -858,10 +858,13 @@ config left over from before this change that still says `harness = "codex"`
 refuses to load; the error names the setting and tells you to change it to
 `claude`.
 
-A task from the board can ask for a harness or a model by name. That request
-is not an order: issuebot always runs the harness this install is configured
-with, and only logs a warning naming both if the two disagree — a preference
-set on a machine the board cannot see never fails a run. A requested model is
+A task from the board can ask for a harness or a model by name. The harness
+the install configures is the default: a task that names a different harness
+gets that one, if this install has it. If this install cannot run the named
+harness, it uses its own and logs a warning that names both — a preference set
+on a machine the board cannot see never fails a run. A task that runs on a
+harness other than the install's starts a new agent session, because a stored
+session belongs to the harness that started it. A requested model is
 passed straight through to the `claude` harness's own `--model` flag with no
 matching against anything; an unrecognised name is the harness's own error to
 raise.

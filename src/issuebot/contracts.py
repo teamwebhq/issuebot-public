@@ -137,10 +137,11 @@ class WorkItem:
     # missing one fails the run rather than being guessed at.
     instructions: Mapping[str, str] = field(default_factory=dict)
 
-    # What the board would like this worked with. A request, not an order: an
-    # install that has not configured the named harness uses its own default
-    # rather than failing a run over a preference set on a machine the board
-    # cannot see.
+    # Which harness the board wants this worked with. It overrides the
+    # harness the install configured, as long as this install has that one
+    # (`run.harness_for_work`); if it cannot run the named harness, it uses its
+    # own rather than failing a run over a preference set on a machine the
+    # board cannot see. None leaves the install's own harness in charge.
     harness: str | None = None
     model: str | None = None
 

@@ -58,7 +58,7 @@ from issuebot.plugins.base import EnvironmentPlugin, SinkPlugin, WorkspacePlugin
 from issuebot.plugins.environments.base import ExecutionEnvironment
 from issuebot.plugins.harnesses.base import Harness
 from issuebot.plugins.sinks.base import Sink
-from issuebot.plugins.sources.base import ConnectionConflict, ForgeAuth, Source, SourceClient
+from issuebot.plugins.sources.base import ConnectionConflict, Source, SourceClient
 from issuebot.plugins.workspaces.base import Workspace
 from issuebot.reporter import ConsoleReporter
 from issuebot.sessions import SessionStore
@@ -415,29 +415,6 @@ def check_repo(connection: Connection, work: WorkItem) -> None:
         )
 
 
-def harness_name_for(work: WorkItem, wiring: Wiring) -> str:
-    """Which harness this run actually launches with.
-
-    ``work.harness`` is a request, not an order (see `WorkItem.harness`): this
-    install runs exactly one harness (`wiring.harness`), fixed for the whole
-    connection, and there is no mechanism here to swap it per item. When the
-    board asked for a different one, that request cannot be honoured — logged
-    once, naming both, so the mismatch is diagnosable from the log rather than
-    silently dropped, and the run proceeds on the install's own default rather
-    than failing over a preference set on a machine the board cannot see.
-    """
-    configured = wiring.harness.name
-    if work.harness is not None and work.harness != configured:
-        logger.warning(
-            "%s requested harness '%s', but this install runs '%s'; using '%s'",
-            work.ref,
-            work.harness,
-            configured,
-            configured,
-        )
-    return configured
-
-
 def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
     """Everything an environment needs to run one work item, decided here.
 
@@ -453,6 +430,11 @@ def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
     branch has nothing to derive `Changes` from either, and the class cannot
     know that.
 
+    No harness is decided here, and the `Job` carries no harness name: which
+    harness runs an item is the item's own call, resolved at launch from
+    ``work.harness`` (`run.harness_for_work`), so a field mirroring it would be
+    set here and read nowhere.
+
     ponytail: ``withheld_tools`` stays empty. Its natural rule is "a run that
     may not report `changes` should not hold the tools that make them", but the
     only vocabulary for that today is one agent CLI's own tool names, and
@@ -463,12 +445,6 @@ def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
     source = wiring.source
 
     check_repo(wiring.connection, work)
-
-    # Called for its side effect only: a mismatch between what the item asked
-    # for and what this install runs gets logged once, here. The `Job` itself
-    # carries no harness name — `run.execute` always launches with
-    # `wiring.harness`, so a field mirroring that would be set and never read.
-    harness_name_for(work, wiring)
 
     permits = source.permits(work) & wiring.workspace.produces_for(wiring.workspace_settings)
     return Job(
@@ -482,27 +458,8 @@ def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
         env={},
         resume_session_id=ctx.store.get(work.task_id) if ctx.store else None,
         run_id=run_id,
-        forge_env=forge_env(source, work),
+        forge_env=run_pipeline.forge_env(source, work),
     )
-
-
-def forge_env(source: Source, work: WorkItem) -> Mapping[str, str]:
-    """What this item's git/`gh` calls should authenticate and identify as.
-
-    A capability, not part of the axis: a source that holds credentials of its
-    own (a board with a GitHub App installed) lends a short-lived one for this
-    item, so the work is attributed to that app rather than to whichever
-    person's personal token is on the machine. One that does not — or that has
-    nothing to lend for this item — leaves the run using the machine's own
-    credential.
-
-    Asked once per run, here, so the controller and a sandbox worker (which
-    rebuilds the job through this same function) each borrow their own. ponytail:
-    a lent token typically lives an hour, so a run longer than that would push
-    with an expired one and report a failed delivery. Re-borrow per step if
-    that ever shows up.
-    """
-    return source.forge_env(work) if isinstance(source, ForgeAuth) else {}
 
 
 class ProjectListener:
@@ -759,6 +716,11 @@ class ProjectListener:
         )
         response = self._environment.run(job, reporter=reporter, cancel=cancel)
 
+        # ponytail: keyed by task id alone, so a session started under one
+        # harness is offered back to whichever harness runs the task next.
+        # `run.harness_for_work` covers the read side (a run on a harness the
+        # board named starts fresh); key the store by (task, harness) if a
+        # board switches harness mid-task often enough for that to hurt.
         if self._ctx.store is not None and response.session_id:
             self._ctx.store.set(job.work.task_id, response.session_id)
 
@@ -807,7 +769,14 @@ class ProjectListener:
 
         try:
             results = run_pipeline.deliver_all(
-                work, response, self._project, sinks=self._sinks, forge_env=job.forge_env
+                work,
+                response,
+                self._project,
+                sinks=self._sinks,
+                # Borrowed again here: `gh pr create` is the furthest step
+                # from the borrow that started the run, and the token that
+                # opened it may have expired while the agent worked.
+                forge_env=run_pipeline.refreshed_forge_env(self._source, job),
             )
             if run_pipeline.required_failed(results, self._sinks):
                 response = replace(

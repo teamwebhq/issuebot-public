@@ -251,7 +251,7 @@ def test_a_second_run_rewrites_the_pull_request_it_finds() -> None:
     """A PR left describing only the first run tells a reviewer about half the
     work in front of them, so every run writes the description afresh."""
     proc = _with_open_pr()
-    harness = FakeHarness(summary="Add the widget and the gauge\n\nBoth, now.")
+    harness = FakeHarness(summary="Title: Add the widget and the gauge\n\nBoth, now.")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(_delivery())
 
@@ -270,7 +270,7 @@ def test_the_description_of_a_second_run_covers_the_whole_pull_request() -> None
     """`changes.base_sha` on a second run is the *first* run's tip, so
     describing this run's range would describe only the increment."""
     proc = _with_open_pr(number=7)
-    harness = FakeHarness(summary="Add the widget")
+    harness = FakeHarness(summary="Title: Add the widget")
 
     GitHubSink(harness=harness, proc=proc).deliver(_delivery())
 
@@ -355,7 +355,7 @@ def test_uses_a_mechanical_description_with_no_harness() -> None:
 
 def test_uses_the_harness_summary_when_one_is_available() -> None:
     proc = _happy()
-    harness = FakeHarness(summary="Add the widget\n\nBecause it was missing.")
+    harness = FakeHarness(summary="Title: Add the widget\n\nBecause it was missing.")
 
     result = GitHubSink(harness=harness, summary_model="haiku", proc=proc).deliver(_delivery())
 
@@ -381,7 +381,7 @@ def test_the_summarizer_call_carries_the_runs_forge_credentials() -> None:
     """The summarizer reads the change with `gh`, so it must authenticate as the
     same identity that pushed the branch."""
     proc = _happy()
-    harness = FakeHarness(summary="Add the widget")
+    harness = FakeHarness(summary="Title: Add the widget")
 
     GitHubSink(harness=harness, proc=proc).deliver(_delivery(forge_env={"GH_TOKEN": "t"}))
 
@@ -392,7 +392,7 @@ def test_the_pr_summary_call_carries_the_boards_guidance() -> None:
     """`Delivery.guidance` — the board's `writing-pull-requests` skill, already
     resolved by `run.execute` — reaches the summarizer call unchanged."""
     proc = _happy()
-    harness = FakeHarness(summary="Add the widget")
+    harness = FakeHarness(summary="Title: Add the widget")
 
     GitHubSink(harness=harness, proc=proc).deliver(_delivery(guidance="Title in the imperative."))
 
@@ -403,7 +403,7 @@ def test_the_pr_summary_call_carries_the_boards_guidance() -> None:
 def test_a_checkout_is_told_to_read_the_change_locally() -> None:
     """With a working copy there is no reason to spend an API call on the diff."""
     proc = _happy()
-    harness = FakeHarness(summary="Add the widget")
+    harness = FakeHarness(summary="Title: Add the widget")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(_delivery())
 
@@ -433,7 +433,7 @@ def test_no_checkout_still_gets_the_model_written_description() -> None:
     summarizer is pointed at the forge — the description is the model's either
     way."""
     proc = _happy()
-    harness = _CwdWatchingHarness(summary="Add the widget\n\nBecause it was missing.")
+    harness = _CwdWatchingHarness(summary="Title: Add the widget\n\nBecause it was missing.")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(
         _delivery(folder="", summary="fixed the thing")
@@ -462,6 +462,63 @@ def test_falls_back_to_a_mechanical_description_when_the_harness_says_nothing() 
     assert result.ok
     create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
     assert "the fallback text" in create[create.index("--title") + 1]
+
+
+def test_narration_before_the_title_never_becomes_the_pull_request_title() -> None:
+    """ISS-231. The summarizer sometimes narrates its reading of the change
+    before it writes anything — and that line, taken as the title because it
+    came first, replaced a perfectly good title with "Read the full diff (all
+    30 files, plus the blob at the PR head to". The title is found by its
+    label, so a preamble cannot be mistaken for one."""
+    proc = _happy()
+    harness = FakeHarness(
+        summary=(
+            "Read the full diff (all 30 files, plus the blob at the PR head to "
+            "confirm the rename), then wrote:\n\n"
+            "Title: Rename the event payload fields\n\n"
+            "The rename reaches every consumer."
+        )
+    )
+
+    result = GitHubSink(harness=harness, proc=proc).deliver(_delivery())
+
+    assert result.ok
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    title = create[create.index("--title") + 1]
+    assert title == "ISS-1: Rename the event payload fields"
+    assert "Read the full diff" not in title
+    assert create[create.index("--body") + 1].startswith("The rename reaches every consumer.")
+
+
+def test_a_summary_that_labels_no_title_is_delivered_mechanically() -> None:
+    """Without the label there is nothing in the answer that can be trusted to
+    be a title, so the mechanical description takes over — and the delivery
+    summary says the description is not the model's."""
+    proc = _happy()
+    harness = FakeHarness(summary="I read the diff and it renames things.")
+
+    result = GitHubSink(harness=harness, proc=proc).deliver(_delivery(summary="renamed the fields"))
+
+    assert result.ok
+    assert "mechanical description" in result.summary
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    assert create[create.index("--title") + 1] == "ISS-1: renamed the fields"
+
+
+def test_a_decorated_title_line_still_leaves_the_body_its_markdown() -> None:
+    """Models dress the label up — a heading mark, bold, a dash for the colon.
+    The title comes out of any of them, and the body keeps its own markdown."""
+    proc = _happy()
+    harness = FakeHarness(
+        summary="## **Title:** Rename the event payload fields\n\n## Why\n\n- the old names lied"
+    )
+
+    result = GitHubSink(harness=harness, proc=proc).deliver(_delivery())
+
+    assert result.ok
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    assert create[create.index("--title") + 1] == "ISS-1: Rename the event payload fields"
+    assert create[create.index("--body") + 1].startswith("## Why\n\n- the old names lied")
 
 
 def test_a_mechanical_title_does_not_repeat_a_ref_the_agent_already_wrote() -> None:
@@ -505,7 +562,7 @@ def test_a_long_mechanical_title_is_cut_back_to_a_whole_word() -> None:
 def test_a_model_title_that_repeats_the_ref_is_not_prefixed_twice() -> None:
     """The summarizer is told not to write the ref and sometimes does anyway."""
     proc = _happy()
-    harness = FakeHarness(summary="ISS-152 - Add the widget\n\nBecause it was missing.")
+    harness = FakeHarness(summary="Title: ISS-152 - Add the widget\n\nBecause it was missing.")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(_delivery(ref="ISS-152"))
 
@@ -607,7 +664,7 @@ def test_a_step_that_wants_no_pull_request_leaves_the_branch_for_a_later_one() -
     meant to pick up. Writing a description nobody will read would cost a whole
     model run, so none is written."""
     proc = _happy()
-    harness = FakeHarness(summary="Add the widget")
+    harness = FakeHarness(summary="Title: Add the widget")
 
     result = GitHubSink(harness=harness, proc=proc).deliver(_delivery(pr=PrPolicy(create=False)))
 

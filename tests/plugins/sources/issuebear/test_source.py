@@ -79,6 +79,38 @@ def test_poll_carries_the_notification_a_mention_is_claimed_by():
     assert [i.notification_id for i in _source(api).poll(timeout=1)] == ["n1"]
 
 
+def test_poll_works_the_oldest_item_first_whichever_list_it_came_from():
+    """A mention that has waited since 8:20 goes before a task assigned at 8:25,
+    even though the board answers tasks and mentions as separate lists."""
+    api = FakeApi(
+        work_items=[
+            {"task_id": "t1", "board_id": "b", "queued_at": "2026-09-01T08:25:00Z"},
+            {
+                "task_id": "t2",
+                "board_id": "b",
+                "kind": "mention",
+                "notification_id": "n1",
+                "queued_at": "2026-09-01T08:20:00Z",
+            },
+        ]
+    )
+
+    assert [i.task_id for i in _source(api).poll(timeout=1)] == ["t2", "t1"]
+
+
+def test_poll_keeps_the_boards_order_when_nothing_is_timestamped():
+    """An older board sends no ``queued_at``, and its work is still worked in
+    the order it was sent: tasks, then mentions."""
+    api = FakeApi(
+        work_items=[
+            {"task_id": "t1", "board_id": "b"},
+            {"task_id": "t2", "board_id": "b", "kind": "mention", "notification_id": "n1"},
+        ]
+    )
+
+    assert [i.task_id for i in _source(api).poll(timeout=1)] == ["t1", "t2"]
+
+
 def test_poll_filters_out_items_for_another_board():
     """Both work lists are agent-wide; belt-and-braces even though board_id
     already scoped each request server-side."""

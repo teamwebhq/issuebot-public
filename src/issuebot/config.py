@@ -24,7 +24,7 @@ from __future__ import annotations
 import difflib
 import os
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -288,6 +288,37 @@ def plugin_tables(cfg: Config) -> dict[str, Any]:
     return {name: table for name, table in cfg.model_dump().items() if isinstance(table, dict)}
 
 
+# Harnesses that are installed and would resolve, but must never run. Kept as a
+# named check rather than an unregistered plugin so the refusal can explain
+# itself: see :func:`refuse_unsupported`.
+UNSUPPORTED_HARNESSES = {"codex"}
+
+
+def refuse_unsupported(name: str | None) -> None:
+    """Raise if `name` is a harness this build will not run, whoever asked for
+    it — the config (:func:`harness_name`) or a board item
+    (:func:`issuebot.run.harness_for_work`).
+
+    `"codex"` is refused by name, ahead of any registry lookup, even though the
+    plugin's implementation is still in the tree (`plugins.harnesses.codex`)
+    and would resolve just fine. Skills for a run come from the board via
+    Claude Code's `--plugin-dir`, which Codex has no equivalent for — a Codex
+    run would silently get none of them, which is the exact gap this refusal
+    exists to close. Unregistering the plugin outright would make this the
+    generic "unknown harness" sentence, which is accurate but says nothing
+    about *why*, and would still have listed `codex` among the "known:"
+    harnesses everywhere else this module reports one — offering it as though
+    picking it were still a live option.
+    """
+    if name in UNSUPPORTED_HARNESSES:
+        raise plugins.UnknownPlugin(
+            f'harness = "{name}" is not supported: agent skills now come from the board and '
+            "are loaded via Claude Code's --plugin-dir, which Codex has no equivalent for, so "
+            "a Codex run would get no skills at all. Change harness in your config to "
+            '"claude" (or another installed harness) to continue.'
+        )
+
+
 def harness_name(cfg: Config) -> str:
     """Which harness this config runs: the one it names, or the one installed.
 
@@ -304,28 +335,12 @@ def harness_name(cfg: Config) -> str:
     install that has only one harness to mean. The message below names the key
     to write, not only the plugins to choose from.
 
-    `"codex"` is refused here by name, ahead of the generic lookup below, even
-    though the plugin's implementation is still in the tree
-    (`plugins.harnesses.codex`) and could resolve just fine. Skills for a run
-    come from the board via Claude Code's `--plugin-dir`, which Codex has no
-    equivalent for — a Codex run would silently get none of them, which is the
-    exact gap this refusal exists to close. Unregistering the plugin outright
-    would make this the generic "unknown harness" sentence, which is accurate
-    but says nothing about *why*, and would still have listed `codex` among
-    the "known:" harnesses everywhere else this module reports one (the
-    single-/several-harnesses fallback below, a typo of an unrelated plugin) —
-    offering it as though picking it were still a live option. Naming it here
-    instead keeps it out of every "known:" list while still explaining itself,
-    once, to the one install that can actually hit it: a saved
+    An unsupported harness (`"codex"`) is refused ahead of the lookup below by
+    :func:`refuse_unsupported`, which keeps it out of every "known:" list here
+    while still explaining itself to the one install that can hit it: a saved
     `harness = "codex"` from before this build.
     """
-    if cfg.harness == "codex":
-        raise plugins.UnknownPlugin(
-            'harness = "codex" is not supported: agent skills now come from the board and '
-            "are loaded via Claude Code's --plugin-dir, which Codex has no equivalent for, so "
-            "a Codex run would get no skills at all. Change harness in your config to "
-            '"claude" (or another installed harness) to continue.'
-        )
+    refuse_unsupported(cfg.harness)
 
     if cfg.harness is not None:
         return cfg.harness
@@ -354,13 +369,22 @@ def harness_settings(cfg: Config, name: str | None = None) -> dict[str, Any]:
     return cfg.model_dump().get(name or harness_name(cfg)) or {}
 
 
-def harness_for(cfg: Config, *, proc: Process = REAL) -> Harness:
-    """The configured harness plugin's implementation, given its `command`
-    override (if any) and wired to `proc`.
+def harness_named(name: str, settings: Mapping[str, Any], *, proc: Process = REAL) -> Harness:
+    """One installed harness's implementation, given its `command` override (if
+    any, read from that harness's own table in `settings`) and wired to `proc`.
 
-    The one place that turns a config into a runnable `Harness`, so a new
-    harness plugin needs no change here."""
-    name = harness_name(cfg)
+    The one place that turns a harness name into a runnable `Harness`, so a new
+    harness plugin needs no change here. `settings` is every plugin's table by
+    name — the shape `plugin_tables` returns and `RunnerContext.plugin_settings`
+    carries — so a caller holding either can build a harness the config never
+    named, which is how a board's own harness choice is honoured
+    (:func:`issuebot.run.harness_for_work`).
+
+    Raises `plugins.UnknownPlugin` for a harness that is not installed or not
+    supported here, and `TypeError` for one with no implementation.
+    """
+    refuse_unsupported(name)
+
     plugin = plugins.get("harnesses", name)
     if not isinstance(plugin, HarnessPlugin):
         # Every plugin discovered under "harnesses" is registered as a
@@ -368,11 +392,20 @@ def harness_for(cfg: Config, *, proc: Process = REAL) -> Harness:
         # type for the type checker and doubles as a guard against a
         # harness plugin that was never upgraded past a placeholder.
         raise TypeError(f"harness plugin '{name}' has no implementation")
-    command = harness_settings(cfg).get("command")
+
+    command = (settings.get(name) or {}).get("command")
     kwargs: dict[str, Any] = {"proc": proc}
     if command:
         kwargs["command"] = command
     return plugin.harness(**kwargs)
+
+
+def harness_for(cfg: Config, *, proc: Process = REAL) -> Harness:
+    """The harness this config runs, built from its own settings table.
+
+    The install's default: every run starts here, and only a board item naming
+    a different harness moves off it (:func:`issuebot.run.harness_for_work`)."""
+    return harness_named(harness_name(cfg), plugin_tables(cfg), proc=proc)
 
 
 def executor_name(conn: Connection) -> str:

@@ -147,9 +147,12 @@ class Harness(ABC):
         env: Mapping[str, str] | None = None,
     ) -> str:
         """Generate PR title+body text by reading the change itself. MCP-free
-        and read-only; the first output line is the title, the rest is the body.
-        ``folder`` is the cwd to run in. May raise; callers fall back to a
-        mechanical description.
+        and read-only. The answer labels its title on a line of its own
+        (``Title: ...``) and everything under that line is the body; text
+        before it is ignored, so a model that narrates its reading of the
+        change cannot have that narration read back as the title. ``folder``
+        is the cwd to run in. May raise; callers fall back to a mechanical
+        description.
 
         ``change`` is prose from the sink naming the commands that show the
         change. The harness carries it into its prompt and never reads it, so

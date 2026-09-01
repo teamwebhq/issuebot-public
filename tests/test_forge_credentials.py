@@ -20,7 +20,9 @@ import httpx
 
 from conftest import FakeApi, FakeWorkspace, RecordingReporter, connection, ctx, wiring, work
 from issuebot import runner
-from issuebot.contracts import Changed, Changes, Delivery, Job
+from issuebot.config import SinkRef
+from issuebot.contracts import Changed, Changes, Delivery, Job, Response, SinkResult
+from issuebot.plugins.environments.base import ExecutionEnvironment
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.plugins.sinks.github.sink import GitHubSink
 from issuebot.plugins.sources.issuebear.client import IssuebotClient
@@ -214,3 +216,153 @@ def _completed(out: str):
     from issuebot.process import Completed
 
     return Completed(["gh"], 0, out)
+
+
+# ---------------------------------------------------------------------------
+# Borrowing again, late in the run
+# ---------------------------------------------------------------------------
+
+
+class _RenewingBoard(_Board):
+    """A board that lends a different token on every ask, so a test can tell
+    which ask a run's credential came from."""
+
+    def git_credentials(self, task_id: str) -> dict[str, Any] | None:
+        super().git_credentials(task_id)
+        return {**LENT, "token": f"ghs_{len(self.asked)}"}
+
+
+class _OneShotBoard(_Board):
+    """A board that lends once and cannot answer after that — the late
+    re-borrow fails, as a board that went away mid-run would."""
+
+    def git_credentials(self, task_id: str) -> dict[str, Any] | None:
+        super().git_credentials(task_id)
+        if len(self.asked) > 1:
+            raise RuntimeError("board unreachable")
+        return {**LENT, "token": "ghs_1"}
+
+
+def _job(**overrides: Any) -> Job:
+    """A job permitted to make changes, holding whatever was lent at the start
+    of the run."""
+    fields: dict[str, Any] = {
+        "work": work(),
+        "prompt": "do it",
+        "folder": "/tmp/p",
+        "permits": frozenset({"changes"}),
+        "withheld_tools": (),
+        "timeout_minutes": None,
+        "mcp_servers": (),
+        "env": {},
+        "resume_session_id": None,
+        "forge_env": {"GH_TOKEN": "ghs_start"},
+    }
+    fields.update(overrides)
+    return Job(**fields)
+
+
+def test_the_push_uses_a_token_borrowed_after_the_agent_finished():
+    """A lent token lives an hour and the agent may work for longer, so the one
+    on the Job can be dead by the time there is anything to push."""
+    workspace = _RecordingWorkspace()
+    proc = RecordingProcess()
+    board = _RenewingBoard()
+    w = wiring(connection(), workspace=workspace, source=_source(board), context=ctx())
+
+    execute(_job(), w, reporter=RecordingReporter(), proc=proc)
+
+    workspace.procs[0].run(["git", "push"], cwd="/tmp/p")
+    assert proc.envs[-1]["GH_TOKEN"] == "ghs_1"
+
+
+def test_a_board_that_cannot_answer_late_leaves_the_run_on_the_token_it_started_with():
+    """A possibly-still-valid token beats no token at all: a failed re-borrow
+    must never cost the run its push."""
+    workspace = _RecordingWorkspace()
+    proc = RecordingProcess()
+    board = _Board(error=RuntimeError("board unreachable"))
+    w = wiring(connection(), workspace=workspace, source=_source(board), context=ctx())
+
+    execute(_job(), w, reporter=RecordingReporter(), proc=proc)
+
+    workspace.procs[0].run(["git", "push"], cwd="/tmp/p")
+    assert proc.envs[-1]["GH_TOKEN"] == "ghs_start"
+
+
+def test_a_run_that_was_lent_nothing_asks_the_board_for_nothing_late():
+    """Nothing was lent, so there is nothing to renew — and no board call to
+    make for a run that authenticates with the machine's own credential."""
+    board = _Board()
+    w = wiring(connection(), workspace=_RecordingWorkspace(), source=_source(board), context=ctx())
+
+    execute(_job(forge_env={}), w, reporter=RecordingReporter(), proc=RecordingProcess())
+
+    assert board.asked == []
+
+
+class _RecordingSink:
+    """A sink that keeps the deliveries it was handed."""
+
+    name = "pr"
+    accepts = frozenset({"changes"})
+
+    def __init__(self) -> None:
+        self.deliveries: list[Delivery] = []
+
+    def deliver(self, delivery: Delivery) -> SinkResult:
+        self.deliveries.append(delivery)
+        return SinkResult(sink=self.name, ok=True, summary="opened PR")
+
+
+class _StubEnvironment(ExecutionEnvironment):
+    """Stands in for the environment: reports a run that changed something,
+    without running one."""
+
+    name = "stub"
+
+    def __init__(self) -> None:
+        pass
+
+    def run(self, job, *, reporter, cancel=None) -> Response:
+        return Response(
+            status="done",
+            changes=Changes(
+                branch="b", base_sha="a", head_sha="b2", stat="1 file", files_changed=1
+            ),
+            outputs=[Changed(summary="did stuff")],
+        )
+
+
+def _delivering_listener(board: _Board, sink: _RecordingSink) -> runner.ProjectListener:
+    """A listener whose runs produce changes for ``sink`` to deliver."""
+    return runner.ProjectListener(
+        wiring(
+            connection(git_init="branch"),
+            api=board,
+            source=_source(board),
+            context=ctx(),
+            environment=_StubEnvironment(),
+            sinks=[(SinkRef(name="pr", required=True), sink)],
+        )
+    )
+
+
+def test_the_pull_request_is_opened_with_a_token_borrowed_after_the_run():
+    """`gh pr create` is the last thing a run does, and the furthest from the
+    borrow that started it."""
+    board = _RenewingBoard()
+    sink = _RecordingSink()
+
+    _delivering_listener(board, sink)._process(work())
+
+    assert sink.deliveries[0].forge_env["GH_TOKEN"] == "ghs_2"
+
+
+def test_delivery_falls_back_to_the_runs_own_token_when_the_board_cannot_answer():
+    board = _OneShotBoard()
+    sink = _RecordingSink()
+
+    _delivering_listener(board, sink)._process(work())
+
+    assert sink.deliveries[0].forge_env["GH_TOKEN"] == "ghs_1"
