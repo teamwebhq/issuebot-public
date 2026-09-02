@@ -14,6 +14,7 @@ exactly as before. Nothing here may fail a run.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -27,7 +28,7 @@ from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.plugins.sinks.github.sink import GitHubSink
 from issuebot.plugins.sources.issuebear.client import IssuebotClient
 from issuebot.plugins.sources.issuebear.source import Issuebear
-from issuebot.process import RecordingProcess
+from issuebot.process import RealProcess, RecordingProcess
 from issuebot.run import RESPONSE_ENV, execute
 
 LENT = {
@@ -79,15 +80,59 @@ def test_the_app_token_and_the_clankers_authorship_travel_together():
     assert env["GIT_COMMITTER_NAME"] == "PushBot"
 
 
-def test_git_is_pointed_at_the_lent_token_even_in_a_checkout_we_did_not_clone():
+def _machine_with_its_own_helper(tmp_path) -> dict[str, str]:
+    """A machine that already answers for github.com, and a stand-in ``gh``.
+
+    Stands for the developer's laptop (osxkeychain in Xcode's system config) or
+    a CI runner (``store``): a helper git finds before anything issuebot sets,
+    holding a personal credential GitHub no longer accepts. The stand-in ``gh``
+    prints what the real one prints — the token it was given.
+    """
+    stale = tmp_path / "stale-helper"
+    stale.write_text(
+        '#!/bin/sh\n[ "$1" = get ] && printf "username=stale\\npassword=stale-pat\\n"\nexit 0\n'
+    )
+    stale.chmod(0o755)
+
+    system = tmp_path / "system.gitconfig"
+    system.write_text(f'[credential "https://github.com"]\n\thelper = {stale}\n')
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gh = fake_bin / "gh"
+    gh.write_text('#!/bin/sh\nprintf "username=x-access-token\\npassword=$GH_TOKEN\\n"\n')
+    gh.chmod(0o755)
+
+    return {
+        "GIT_CONFIG_SYSTEM": str(system),
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "global.gitconfig"),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def test_git_is_pointed_at_the_lent_token_even_in_a_checkout_we_did_not_clone(tmp_path):
     """A worktree cut from the developer's own repository never saw issuebot's
     clone-time credential helper, so its push would authenticate with the
-    machine's keychain — the very credential this exists to stop using."""
+    machine's keychain — the very credential this exists to stop using.
+
+    Git asks every configured helper in turn and takes the first answer, so
+    this asks real git what it would send to github.com on a machine that
+    already has a helper of its own, and the answer must be the lent token.
+    """
     env = _source(_Board()).forge_env(work())
 
-    assert env["GIT_CONFIG_COUNT"] == "1"
-    assert env["GIT_CONFIG_KEY_0"] == "credential.https://github.com.helper"
-    assert env["GIT_CONFIG_VALUE_0"] == "!gh auth git-credential"
+    answer: list[str] = []
+    RealProcess().spawn(
+        ["git", "credential", "fill"],
+        on_line=answer.append,
+        cwd=str(tmp_path),
+        env={**env, **_machine_with_its_own_helper(tmp_path)},
+        stdin="protocol=https\nhost=github.com\n\n",
+    )
+
+    assert "password=ghs_lent" in answer
+    assert "password=stale-pat" not in answer
 
 
 def test_a_board_with_nothing_to_lend_leaves_the_machines_own_credential():

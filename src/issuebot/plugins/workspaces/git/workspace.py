@@ -71,7 +71,23 @@ DivergenceKind = Literal["branch", "base"]
 # Set on each clone rather than in the user's global git config — issuebot owns
 # the workspaces it cuts, not the machine they sit on — and scoped to
 # github.com, so a remote on another host keeps whatever it already uses.
-GH_CREDENTIAL_CONFIG = "credential.https://github.com.helper=!gh auth git-credential"
+GH_CREDENTIAL_KEY = "credential.https://github.com.helper"
+GH_CREDENTIAL_HELPER = "!gh auth git-credential"
+
+# Two entries, in this order. Adding a helper only *appends* to the list git
+# already has, and git asks every helper in turn and takes the first answer —
+# so a helper configured earlier on the machine (osxkeychain in Xcode's system
+# gitconfig, store on a Linux runner) answers first with whatever stale
+# personal credential it holds, and the push is rejected. An empty value is
+# git's documented reset of the list, so the first entry clears it and the
+# second makes ``gh`` the only helper there is.
+GH_CREDENTIAL_CONFIG = (
+    f"{GH_CREDENTIAL_KEY}=",
+    f"{GH_CREDENTIAL_KEY}={GH_CREDENTIAL_HELPER}",
+)
+
+# The same pair as command-line arguments, for a clone that has no config yet.
+GH_CREDENTIAL_ARGS = tuple(arg for entry in GH_CREDENTIAL_CONFIG for arg in ("-c", entry))
 
 
 class GitError(RuntimeError):
@@ -553,7 +569,7 @@ def _working_copy(
         here.check("fetch", "fetch", "origin")
     else:
         private_dir(path.parent)
-        Git(path.parent, proc).check("clone", "clone", "-c", GH_CREDENTIAL_CONFIG, repo, str(path))
+        Git(path.parent, proc).check("clone", "clone", *GH_CREDENTIAL_ARGS, repo, str(path))
 
     return str(path)
 
@@ -566,8 +582,14 @@ def _use_gh_credentials(g: Git) -> None:
     whether this run cut it or an earlier one did. Idempotent, and failure is
     not fatal — a clone that already authenticates some other way keeps
     working.
+
+    Two commands for the two entries: the first replaces every helper this copy
+    has with the empty value that resets git's list, the second adds ``gh`` to
+    the now-empty list. Replacing rather than adding is also what keeps this
+    idempotent across reuses.
     """
-    g.git("config", "--local", *GH_CREDENTIAL_CONFIG.split("=", 1))
+    g.git("config", "--local", "--replace-all", GH_CREDENTIAL_KEY, "")
+    g.git("config", "--local", "--add", GH_CREDENTIAL_KEY, GH_CREDENTIAL_HELPER)
 
 
 def _start_point(g: Git, project: Connection, branch: str) -> str | None:

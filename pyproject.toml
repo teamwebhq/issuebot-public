@@ -1,6 +1,6 @@
 [project]
 name = "issuebot"
-version = "0.3.0"
+version = "0.3.1"
 description = "Run a coding agent against the tasks its configured source assigns it."
 requires-python = ">=3.11"
 readme = "README.md"

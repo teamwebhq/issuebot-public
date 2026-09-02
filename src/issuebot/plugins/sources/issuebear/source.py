@@ -785,8 +785,18 @@ class Issuebear(Source):
         issuebot cloned already asks ``gh`` for its password, but a worktree cut
         from the developer's own repository never did, and would authenticate a
         push from the machine's keychain — the very credential this replaces.
-        Git reads ``GIT_CONFIG_*`` last of all, so this wins over whatever that
-        checkout is configured with, for this run only.
+        Git reads ``GIT_CONFIG_PARAMETERS`` last of all, so this wins over
+        whatever that checkout is configured with, for this run only.
+
+        The first of the two entries is empty on purpose: it is git's reset of
+        the helper list. Adding a helper only appends to it, and git asks every
+        helper in turn and uses the first answer — so a helper already
+        configured on the machine (osxkeychain on macOS, store on a Linux
+        runner) answers first with a stale personal credential and GitHub
+        rejects the push. ``GIT_CONFIG_PARAMETERS`` carries both entries in one
+        variable because the ``GIT_CONFIG_COUNT`` form cannot: an empty value
+        in this overlay means "unset the variable" (see
+        :func:`issuebot.process._child_env`), so the reset would not survive.
 
         Never raises: a board that has nothing to lend, is too old to know the
         endpoint, or cannot be reached leaves the run using the machine's own
@@ -809,7 +819,8 @@ class Issuebear(Source):
             "GIT_AUTHOR_EMAIL": email,
             "GIT_COMMITTER_NAME": author,
             "GIT_COMMITTER_EMAIL": email,
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "credential.https://github.com.helper",
-            "GIT_CONFIG_VALUE_0": "!gh auth git-credential",
+            "GIT_CONFIG_PARAMETERS": (
+                "'credential.https://github.com.helper=' "
+                "'credential.https://github.com.helper=!gh auth git-credential'"
+            ),
         }

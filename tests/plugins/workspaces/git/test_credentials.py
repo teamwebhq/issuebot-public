@@ -12,7 +12,14 @@ from issuebot.config import Connection
 from issuebot.plugins.workspaces.git.workspace import _working_copy
 from issuebot.process import RecordingProcess
 
-HELPER = "credential.https://github.com.helper=!gh auth git-credential"
+KEY = "credential.https://github.com.helper"
+HELPER = "!gh auth git-credential"
+
+# What git must end up with, in reading order: the empty value that resets the
+# helper list, then ``gh``. Without the reset git keeps every helper the
+# machine already has and takes the first answer — a stale personal credential
+# on a developer's laptop or a CI runner.
+WANTED = ["", HELPER]
 
 
 def _clone(proc: RecordingProcess, root) -> None:
@@ -29,8 +36,9 @@ def test_a_fresh_clone_authenticates_through_gh(tmp_path):
     _clone(proc, tmp_path)
 
     clone = next(c for c in proc.calls if c[:2] == ["git", "clone"])
-    assert "-c" in clone
-    assert clone[clone.index("-c") + 1] == HELPER
+    set_here = [a.split("=", 1)[1] for a in clone if a.startswith(f"{KEY}=")]
+
+    assert set_here == WANTED
 
 
 def test_an_existing_clone_is_corrected(tmp_path):
@@ -42,4 +50,6 @@ def test_an_existing_clone_is_corrected(tmp_path):
 
     _clone(proc, tmp_path)
 
-    assert ["git", "config", "--local", *HELPER.split("=", 1)] in proc.calls
+    configured = [c[-1] for c in proc.calls if c[:3] == ["git", "config", "--local"] and KEY in c]
+
+    assert configured == WANTED
