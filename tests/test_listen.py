@@ -1756,3 +1756,39 @@ def test_supervisor_sends_warnings_to_stderr(tmp_path: Path, capsys: Any) -> Non
         sup.stop()
 
     assert capsys.readouterr().err.count("push of main was rejected") == 1
+
+
+def test_stderr_handler_level_follows_env(monkeypatch: Any) -> None:
+    """ISSUEBOT_LOG_LEVEL sets the level of the process's stderr handler, so a
+    headless runner can put INFO lines in the journal."""
+    import logging
+
+    import issuebot.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "_stderr_handler", None)
+    monkeypatch.setenv("ISSUEBOT_LOG_LEVEL", "info")
+
+    runner_mod._install_stderr_handler()
+    try:
+        assert runner_mod._stderr_handler is not None
+        assert runner_mod._stderr_handler.level == logging.INFO
+    finally:
+        runner_mod.logger.removeHandler(runner_mod._stderr_handler)
+
+
+def test_stderr_handler_ignores_bad_env_level(monkeypatch: Any) -> None:
+    """An unknown level name keeps WARNING and does not raise — a bad value in a
+    unit file must not stop the runner."""
+    import logging
+
+    import issuebot.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "_stderr_handler", None)
+    monkeypatch.setenv("ISSUEBOT_LOG_LEVEL", "chatty")
+
+    runner_mod._install_stderr_handler()
+    try:
+        assert runner_mod._stderr_handler is not None
+        assert runner_mod._stderr_handler.level == logging.WARNING
+    finally:
+        runner_mod.logger.removeHandler(runner_mod._stderr_handler)

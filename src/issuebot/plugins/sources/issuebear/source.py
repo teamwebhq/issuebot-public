@@ -798,6 +798,17 @@ class Issuebear(Source):
         in this overlay means "unset the variable" (see
         :func:`issuebot.process._child_env`), so the reset would not survive.
 
+        ``ISSUEBOT_FORGE_TOKEN_EXPIRES_AT`` is the odd one out: it is not a git
+        or ``gh`` variable and neither of them reads it. It carries the board's
+        stated expiry of the lent token, so a later step
+        (:func:`issuebot.run.refreshed_forge_env`) can say whether the token it
+        is about to reuse is already dead. It is absent when the board did not
+        say. Nothing outside issuebot may read it.
+
+        Every outcome is logged, because a borrow that quietly lends nothing
+        looks exactly like a borrow that worked until a push is refused an hour
+        later. The token itself is never logged, in whole or in part.
+
         Never raises: a board that has nothing to lend, is too old to know the
         endpoint, or cannot be reached leaves the run using the machine's own
         credential, exactly as before this existed.
@@ -809,11 +820,24 @@ class Issuebear(Source):
             return {}
 
         if not lent or not lent.get("token"):
+            logger.warning(
+                "the board lent no git credentials for %s; "
+                "this run uses the machine's own credential",
+                work.ref,
+            )
             return {}
+
+        expires_at = lent.get("expires_at")
+        logger.info(
+            "borrowed git credentials for %s on %s, expiring %s",
+            work.ref,
+            lent.get("repo_full_name") or "an unnamed repository",
+            expires_at or "at an unstated time",
+        )
 
         author = lent.get("author_name") or "Agent"
         email = lent.get("author_email") or "agent@agents.invalid"
-        return {
+        env = {
             "GH_TOKEN": lent["token"],
             "GIT_AUTHOR_NAME": author,
             "GIT_AUTHOR_EMAIL": email,
@@ -824,3 +848,8 @@ class Issuebear(Source):
                 "'credential.https://github.com.helper=!gh auth git-credential'"
             ),
         }
+
+        if expires_at:
+            env["ISSUEBOT_FORGE_TOKEN_EXPIRES_AT"] = str(expires_at)
+
+        return env

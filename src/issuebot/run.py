@@ -41,6 +41,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -596,14 +597,66 @@ def refreshed_forge_env(source: Source, job: Job) -> Mapping[str, str]:
     (installation, repo) and renews shortly before expiry, so asking again is
     nearly free and never hands back a nearly-dead token.
 
-    A failed borrow falls back to what the run started with: a token that may
-    still be valid beats a delivery that certainly fails. Nothing lent at the
-    start means there is nothing to renew, and no board call worth making.
+    A failed borrow falls back to what the run started with. That fallback is
+    worth something only while the original token is still in date, which on a
+    run longer than the token's hour it is not — the fallback is then worthless
+    and the next git or ``gh`` call is refused by GitHub. Behaviour is the same
+    either way (there is nothing better to offer), but the certain failure is
+    logged where it happens instead of surfacing as GitHub's "Invalid username
+    or token" much later.
+
+    Nothing lent at the start means there is nothing to renew, and no board
+    call worth making.
     """
     if not job.forge_env:
         return {}
 
-    return forge_env(source, job.work) or job.forge_env
+    borrowed = forge_env(source, job.work)
+    if borrowed:
+        return borrowed
+
+    _warn_if_fallback_expired(job)
+
+    return job.forge_env
+
+
+def _warn_if_fallback_expired(job: Job) -> None:
+    """Say whether the token the run started with is already dead.
+
+    Reads the board's stated expiry from the job's own forge environment (see
+    :meth:`issuebot.plugins.sources.issuebear.source.Issuebear.forge_env`). An
+    absent or unparseable value means the age cannot be told, so nothing is
+    said. Never raises: this only makes a failure legible, and must not cause
+    one.
+    """
+    stated = job.forge_env.get("ISSUEBOT_FORGE_TOKEN_EXPIRES_AT")
+    if not stated:
+        return
+
+    try:
+        expires_at = datetime.fromisoformat(stated.replace("Z", "+00:00"))
+    except ValueError:
+        logger.debug("could not read the lent token's expiry %r for %s", stated, job.work.ref)
+        return
+
+    now = datetime.now(expires_at.tzinfo)
+
+    # A minute of slack: a token that dies while the push is in flight is as
+    # dead as one that died an hour ago.
+    if expires_at - now <= timedelta(minutes=1):
+        logger.warning(
+            "could not borrow git credentials again for %s and the token this run started with "
+            "expired at %s; the next git or gh call will be refused by GitHub",
+            job.work.ref,
+            stated,
+        )
+    else:
+        logger.debug(
+            "could not borrow git credentials again for %s; the token this run started with "
+            "is in date until %s",
+            job.work.ref,
+            stated,
+        )
 
 
 # ---------------------------------------------------------------------------

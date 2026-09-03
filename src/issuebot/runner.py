@@ -81,10 +81,17 @@ def _install_stderr_handler() -> None:
     ends that, so without this handler the operator's only copy of a warning
     is the board's telemetry tail — nothing in journalctl or docker logs.
 
-    WARNING and above only: INFO chatter (claiming, polling, retries) belongs
-    in the dashboard tail, not on an interactive ``issuebot listen`` feed. No
-    thread filter, so warnings from pool workers running concurrent tasks —
-    which the tail's per-listener thread filter drops — still get out.
+    WARNING and above by default: INFO chatter (claiming, polling, retries)
+    belongs in the dashboard tail, not on an interactive ``issuebot listen``
+    feed. No thread filter, so warnings from pool workers running concurrent
+    tasks — which the tail's per-listener thread filter drops — still get out.
+
+    ``ISSUEBOT_LOG_LEVEL`` moves this handler's level, so a headless runner can
+    put INFO (or DEBUG) in the journal while it is examined. It accepts the
+    level names — ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``, ``CRITICAL`` —
+    in any case. An empty or unknown value keeps WARNING: a bad value in a unit
+    file must not stop the runner. The logger itself stays at INFO, thus the
+    dashboard tail is the same at each level.
     """
     global _stderr_handler
 
@@ -93,7 +100,15 @@ def _install_stderr_handler() -> None:
 
     # Bound to the current sys.stderr. No timestamp: the journal adds its own.
     _stderr_handler = logging.StreamHandler()
-    _stderr_handler.setLevel(logging.WARNING)
+
+    level = os.environ.get("ISSUEBOT_LOG_LEVEL", "").strip().upper()
+
+    # setLevel raises ValueError on a name it does not know, so fall back.
+    try:
+        _stderr_handler.setLevel(level or "WARNING")
+    except ValueError:
+        _stderr_handler.setLevel(logging.WARNING)
+
     _stderr_handler.setFormatter(logging.Formatter("issuebot %(levelname)s %(message)s"))
 
     logger.addHandler(_stderr_handler)

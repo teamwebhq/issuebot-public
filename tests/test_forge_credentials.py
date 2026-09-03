@@ -14,7 +14,9 @@ exactly as before. Nothing here may fail a run.
 
 from __future__ import annotations
 
+import logging
 import os
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -29,7 +31,7 @@ from issuebot.plugins.sinks.github.sink import GitHubSink
 from issuebot.plugins.sources.issuebear.client import IssuebotClient
 from issuebot.plugins.sources.issuebear.source import Issuebear
 from issuebot.process import RealProcess, RecordingProcess
-from issuebot.run import RESPONSE_ENV, execute
+from issuebot.run import RESPONSE_ENV, execute, refreshed_forge_env
 
 LENT = {
     "token": "ghs_lent",
@@ -411,3 +413,80 @@ def test_delivery_falls_back_to_the_runs_own_token_when_the_board_cannot_answer(
     _delivering_listener(board, sink)._process(work())
 
     assert sink.deliveries[0].forge_env["GH_TOKEN"] == "ghs_1"
+
+
+# ---------------------------------------------------------------------------
+# Saying so when the borrow lends nothing, and when the fallback is dead
+# ---------------------------------------------------------------------------
+
+
+def test_the_expiry_the_board_stated_rides_along_with_the_token():
+    """A later step decides whether the token it holds is still worth using,
+    and can only do that if the board's expiry travelled with it."""
+    env = _source(_Board()).forge_env(work())
+
+    assert env["ISSUEBOT_FORGE_TOKEN_EXPIRES_AT"] == "2026-08-22T13:00:00Z"
+
+
+def test_a_board_that_states_no_expiry_leaves_the_key_out():
+    """An unstated expiry is not a guess to make up: the key is simply absent,
+    and the later step treats that as "cannot tell"."""
+    lent = {k: v for k, v in LENT.items() if k != "expires_at"}
+
+    assert "ISSUEBOT_FORGE_TOKEN_EXPIRES_AT" not in _source(_Board(lent)).forge_env(work())
+
+
+def test_a_board_that_lends_nothing_says_so_in_the_log(caplog):
+    """The silent path: nothing is lent, the run quietly uses the machine's own
+    credential, and only a log tells anybody that happened."""
+    with caplog.at_level(logging.WARNING, logger="issuebot"):
+        env = _source(_Board(credentials=None)).forge_env(work())
+
+    assert env == {}
+    assert caplog.records
+
+
+def _expiry(minutes: float) -> str:
+    """An ISO-8601 expiry that many minutes from now, as the board spells it."""
+    return (datetime.now(UTC) + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+
+def _warned_about(caplog, expiry: str) -> bool:
+    """Whether a warning named that expiry.
+
+    The re-borrow failing is itself worth a warning, and always logs one, so
+    the expiry the job carried is what tells the two warnings apart.
+    """
+    return any(
+        expiry in record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    )
+
+
+def test_a_failed_reborrow_onto_an_expired_token_says_the_next_call_will_fail(caplog):
+    """The long-run case: the board could not be asked again and the token the
+    run started with died an hour ago, so the push cannot work."""
+    expiry = _expiry(-60)
+    job = _job(forge_env={"GH_TOKEN": "ghs_start", "ISSUEBOT_FORGE_TOKEN_EXPIRES_AT": expiry})
+    source = _source(_Board(error=RuntimeError("board unreachable")))
+
+    with caplog.at_level(logging.WARNING, logger="issuebot"):
+        env = refreshed_forge_env(source, job)
+
+    assert env == job.forge_env
+    assert _warned_about(caplog, expiry)
+
+
+def test_a_failed_reborrow_onto_an_in_date_token_is_not_worth_a_warning(caplog):
+    """The token still has most of its hour left, so the fallback is a real
+    one and there is nothing to warn about."""
+    expiry = _expiry(30)
+    job = _job(forge_env={"GH_TOKEN": "ghs_start", "ISSUEBOT_FORGE_TOKEN_EXPIRES_AT": expiry})
+    source = _source(_Board(error=RuntimeError("board unreachable")))
+
+    with caplog.at_level(logging.DEBUG, logger="issuebot"):
+        env = refreshed_forge_env(source, job)
+
+    assert env == job.forge_env
+    assert not _warned_about(caplog, expiry)

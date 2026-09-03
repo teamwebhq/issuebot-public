@@ -958,6 +958,17 @@ issuebot repeats the warning, with new numbers, until the agent writes again.
 Ctrl-C stops the agent and releases the run. Thus no claim stays on the board.
 A second Ctrl-C exits immediately.
 
+### Runner log level
+
+The runner sends its warnings to stderr, thus `journalctl` and `docker logs`
+show them. To show more, set the `$ISSUEBOT_LOG_LEVEL` variable to `DEBUG`,
+`INFO`, `WARNING`, `ERROR` or `CRITICAL`. The default is `WARNING`. An unknown
+value keeps `WARNING`. The dashboard log tail always shows the `INFO` lines.
+
+```sh
+ISSUEBOT_LOG_LEVEL=INFO issuebot listen
+```
+
 ### Hard timeout
 
 By default, a run ends only when the agent exits, or when you stop it. To set a
