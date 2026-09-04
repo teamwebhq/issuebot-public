@@ -193,7 +193,8 @@ class Config(BaseModel):
     # ends when the agent exits or the user aborts). When set, a run that
     # exceeds it is auto-aborted and classified "timed out".
     task_timeout_minutes: int | None = None
-    # Maximum number of tasks the runner works on concurrently.
+    # Maximum number of tasks the runner works on concurrently per harness: at 2,
+    # two `claude` tasks and two `ollama` tasks run at the same time.
     max_concurrent: int = 1
     connections: list[Connection] = []
 

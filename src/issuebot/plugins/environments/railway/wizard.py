@@ -50,7 +50,7 @@ def _warn_prereqs(has_token: bool = False) -> None:
     typer.echo(
         "Reminder: run 'issuebot railway build-template' once before your first "
         "railway task. You can raise max_concurrent in config.toml to run more "
-        "railway tasks in parallel."
+        "railway tasks in parallel on each harness."
     )
 
 

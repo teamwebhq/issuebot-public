@@ -477,6 +477,92 @@ def job_for(work: WorkItem, wiring: Wiring, *, run_id: str = "") -> Job:
     )
 
 
+class HarnessSlots:
+    """The runner's concurrency budget: ``limit`` tasks at once *per harness*.
+
+    One object shared by every listener, so the cap counts tasks across the
+    whole runner rather than per connection — but bucketed by the harness that
+    will do the work, because the harnesses do not compete for the same
+    resource. Two `claude` runs share an API rate limit and a machine's memory;
+    a `claude` run and an `ollama` run do not, and making them queue behind one
+    another leaves whichever tool is idle idle.
+
+    Counted rather than built from a semaphore per harness, so the hold gate is
+    exact: :meth:`hold` shuts the gate and every waiter re-tests it on each
+    wake, so a permit freed during a drain goes to the drain and never to a
+    listener that was already waiting. A bucket is simply a key with a count,
+    so one appears on first use and no harness has to be declared here.
+
+    All of it under one condition variable — the lock the counts need and the
+    wait/wake the waiters need are the same thing.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+
+        # Guards `_taken` and `_held`, and wakes every waiter when either moves.
+        self._cond = threading.Condition()
+
+        # Tasks in flight per harness name. A missing key is zero.
+        self._taken: dict[str, int] = {}
+
+        # Set by `hold`: no harness hands out a permit while it is True.
+        self._held = False
+
+    def acquire(self, harness: str, timeout: float) -> bool:
+        """Take one of ``harness``'s permits, waiting up to ``timeout`` seconds.
+
+        False means the budget for that harness stayed full for the whole wait,
+        or the runner is held. A held runner still waits out the timeout rather
+        than answering at once, so a caller looping on this does not spin.
+        """
+        deadline = time.monotonic() + timeout
+
+        with self._cond:
+            while self._held or self._taken.get(harness, 0) >= self.limit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+
+            self._taken[harness] = self._taken.get(harness, 0) + 1
+            return True
+
+    def release(self, harness: str) -> None:
+        """Give one of ``harness``'s permits back and wake whoever is waiting."""
+        with self._cond:
+            self._taken[harness] = max(self._taken.get(harness, 0) - 1, 0)
+            self._cond.notify_all()
+
+    def hold(self, timeout: float) -> bool:
+        """Shut the gate on every harness and wait for what is in flight to end.
+
+        The gate shuts first and stays shut, so nothing new is handed out while
+        the drain waits — including for a harness nothing has run yet, whose
+        bucket does not exist. Returns True once every permit is back, False on
+        a timeout; the gate stays shut either way, so a caller that gives up
+        still has a runner that is claiming nothing until :meth:`resume`.
+        """
+        deadline = time.monotonic() + timeout
+
+        with self._cond:
+            self._held = True
+
+            while any(self._taken.values()):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+
+            return True
+
+    def resume(self) -> None:
+        """Open the gate again, so held listeners take permits and work flows."""
+        with self._cond:
+            self._held = False
+            self._cond.notify_all()
+
+
 class ProjectListener:
     """Polls one board for the work outstanding against this agent and runs it."""
 
@@ -486,7 +572,7 @@ class ProjectListener:
         *,
         wait_timeout: int = 25,
         max_concurrent: int = 1,
-        slots: threading.BoundedSemaphore | None = None,
+        slots: HarnessSlots | None = None,
     ) -> None:
         """Hold one connection's assembled run machinery.
 
@@ -533,13 +619,13 @@ class ProjectListener:
         # serial in-line processing on the poll thread.
         self._pool: concurrent.futures.ThreadPoolExecutor | None = None
 
-        # `max_concurrent` counts the tasks *this runner* works at once, so the
-        # cap is one object shared by every listener — the Supervisor's. A
-        # listener built on its own (a test, a single-connection run) gets one
-        # of its own, which for one connection is the same thing. Without a
-        # shared one, each listener enforced the cap privately and a config with
-        # three connections ran three times the number it asked for.
-        self._slots = slots or threading.BoundedSemaphore(max_concurrent)
+        # `max_concurrent` counts the tasks *this runner* works at once per
+        # harness, so the cap is one object shared by every listener — the
+        # Supervisor's. A listener built on its own (a test, a single-connection
+        # run) gets one of its own, which for one connection is the same thing.
+        # Without a shared one, each listener enforced the cap privately and a
+        # config with three connections ran three times the number it asked for.
+        self._slots = slots or HarnessSlots(max_concurrent)
 
     # -- live state ---------------------------------------------------------
 
@@ -624,14 +710,22 @@ class ProjectListener:
         lost, the pool was full, the board was unreachable — is simply on the
         next answer. Nothing has to be remembered between rounds.
 
-        With ``max_concurrent > 1`` the work is dispatched to a bounded thread
-        pool so several runs proceed at once; claiming itself always stays on
-        this poll thread, so a claim genuinely lost still gates correctly.
+        Where more than one run can proceed at once the work is dispatched to a
+        bounded thread pool; claiming itself always stays on this poll thread,
+        so a claim genuinely lost still gates correctly.
+
+        The pool is sized by the parallelism actually reachable — the cap times
+        the number of installed harnesses — because `max_concurrent` is a budget
+        *per harness*. The budget stays the real gate; the pool must only not be
+        the binding constraint, or an install capped at one task per harness
+        could never run two different harnesses at the same time.
         """
         target = self._project.folder or conn_setting(self._project, "repo")
         logger.info("listening on board %s → %s", self._board, target)
-        if self._max_concurrent > 1:
-            self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=self._max_concurrent)
+
+        reachable = self._max_concurrent * len(plugins.names_of("harnesses"))
+        if reachable > 1:
+            self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=reachable)
         transient_fails = 0
 
         while not self._stop.is_set():
@@ -669,8 +763,17 @@ class ProjectListener:
         is running yet. And it is *waited for*, not tested, because pausing
         this listener's polling is the right answer anyway: there is no point
         fetching work faster than it can be run.
+
+        Which harness the item will run on is resolved first, because that is
+        the budget it draws on: the cap is per harness, so taking a permit for
+        the wrong one would queue this item behind work it never competes with.
+        `harness_for_work` therefore builds a harness twice per item — here, and
+        again at launch in `run.execute`. Deliberate: it is a plugin
+        instantiation and nothing more, and one resolution rule beats two.
         """
-        while not self._slots.acquire(timeout=0.5):
+        harness = run_pipeline.harness_for_work(work, self._wiring).name
+
+        while not self._slots.acquire(harness, timeout=0.5):
             if self._stop.is_set():
                 return
 
@@ -685,7 +788,7 @@ class ProjectListener:
             # the execute/release body moves to a worker.
             if self._pool is None:
                 handed_off = True
-                self._run_and_free(work, claim)
+                self._run_and_free(work, claim, harness)
                 return
 
             # claim() is a network round-trip, so stop() can shut the pool down in
@@ -697,7 +800,7 @@ class ProjectListener:
                 self._safe_release(claim, stopped)
                 return
             try:
-                self._pool.submit(self._run_and_free, work, claim)
+                self._pool.submit(self._run_and_free, work, claim, harness)
                 handed_off = True
             except RuntimeError:  # pool shut down concurrently
                 self._safe_release(claim, stopped)
@@ -705,14 +808,14 @@ class ProjectListener:
             # Whoever ends up running the work gives the slot back when it is
             # done; every path that never got that far gives it back here.
             if not handed_off:
-                self._slots.release()
+                self._slots.release(harness)
 
-    def _run_and_free(self, work: WorkItem, claim: Claim) -> None:
-        """Run one claimed item, then give its concurrency slot back."""
+    def _run_and_free(self, work: WorkItem, claim: Claim, harness: str) -> None:
+        """Run one claimed item, then give its harness's slot back."""
         try:
             self._run_claimed(work, claim)
         finally:
-            self._slots.release()
+            self._slots.release(harness)
 
     # -- running ------------------------------------------------------------
 
@@ -976,13 +1079,9 @@ class Supervisor:
 
         # The runner-wide concurrency cap, shared by every listener so
         # `max_concurrent` counts tasks in flight across all of them rather than
-        # per connection. Built on the first reconcile, where the config that
-        # names the number is in hand.
-        self._slots: threading.BoundedSemaphore | None = None
-        self._slot_count = 0
-        # How many of those slots `hold` is currently sitting on, so `resume`
-        # gives back exactly what it took (a BoundedSemaphore raises otherwise).
-        self._held = 0
+        # per connection — bucketed per harness (see `HarnessSlots`). Built on
+        # the first reconcile, where the config that names the number is in hand.
+        self._slots: HarnessSlots | None = None
 
         # Per-connection listener state, keyed by connection name.
         self._listeners: dict[str, ProjectListener] = {}
@@ -1116,48 +1215,35 @@ class Supervisor:
     def hold(self, timeout: float) -> bool:
         """Stop new work being claimed, and wait for what is in flight to finish.
 
-        Every run holds one of :attr:`_slots` from before its claim until after
-        its release, so taking all of them is both halves of a drain at once:
-        with every permit held, no listener can claim anything, and the last
-        permit only comes free when the last run has released its claim. That
-        is why this needs no cooperation from the listeners and — unlike
-        stopping them — can be undone: :meth:`resume` hands the permits back and
-        the poll loops, which never stopped, carry straight on.
+        Every run holds one of :attr:`_slots`' permits from before its claim
+        until after its release, so shutting that gate is both halves of a drain
+        at once: no listener can take a permit for any harness, and the last one
+        comes back only when the last run has released its claim. A listener
+        already waiting for a permit re-tests the gate on every wake, so a
+        permit a finishing run frees goes to the drain rather than starting the
+        next task. That is why this needs no cooperation from the listeners and
+        — unlike stopping them — can be undone: :meth:`resume` opens the gate
+        and the poll loops, which never stopped, carry straight on.
 
-        A listener already *waiting* on a slot for work in hand races this for
-        each freed permit, and can win — extending the drain by that run. The
-        timeout bounds it: a drain that keeps losing races simply times out and
-        the update is refused, which is the safe answer either way.
+        Returns True when everything came back inside ``timeout``. On a timeout
+        the gate stays shut and it answers False, leaving the caller to decide
+        whether to go ahead — an update that waits forever is an update that
+        never lands on a busy runner.
 
-        Returns True when everything came free inside ``timeout``. On a timeout
-        it keeps whatever it did get (so the drain is still as complete as it
-        could be) and answers False, leaving the caller to decide whether to go
-        ahead — an update that waits forever is an update that never lands on a
-        busy runner.
-
-        Called from the command thread only, which is why ``_held`` needs no
-        lock of its own.
+        True with no slots yet: nothing has been reconciled, so nothing is
+        running and there is nothing to drain.
         """
         if self._slots is None:
             return True
 
-        deadline = time.monotonic() + timeout
-        while self._held < self._slot_count:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not self._slots.acquire(timeout=remaining):
-                return False
-            self._held += 1
-
-        return True
+        return self._slots.hold(timeout)
 
     def resume(self) -> None:
-        """Give back every slot :meth:`hold` took, so work flows again."""
+        """Open the gate :meth:`hold` shut, so work flows again."""
         if self._slots is None:
             return
 
-        while self._held:
-            self._held -= 1
-            self._slots.release()
+        self._slots.resume()
 
     def stop(self) -> None:
         """Signal the watch loop and all listener threads to stop."""
@@ -1277,25 +1363,24 @@ class Supervisor:
     def _resize_slots(self, wanted: int) -> None:
         """Make sure the shared concurrency cap exists, and say so if it moved.
 
-        A semaphore's count cannot be changed while runs are holding permits
-        against it, and swapping in a fresh one would let the in-flight runs and
-        the new arrivals be capped by different objects — briefly running more
-        at once than either number allows. So a changed ``max_concurrent`` is
-        reported rather than applied: every other setting a hot reload picks up
-        belongs to one connection, and this is the only one that belongs to the
-        process.
+        The cap cannot be moved while runs are holding permits against it, and
+        swapping in a fresh :class:`HarnessSlots` would let the in-flight runs
+        and the new arrivals be counted by different objects — briefly running
+        more at once than either number allows. So a changed ``max_concurrent``
+        is reported rather than applied: every other setting a hot reload picks
+        up belongs to one connection, and this is the only one that belongs to
+        the process.
         """
         if self._slots is None:
-            self._slots = threading.BoundedSemaphore(wanted)
-            self._slot_count = wanted
+            self._slots = HarnessSlots(wanted)
             return
 
-        if wanted != self._slot_count:
+        if wanted != self._slots.limit:
             logger.warning(
                 "max_concurrent is now %d but this runner is still capped at %d; "
                 "restart `issuebot listen` to apply it",
                 wanted,
-                self._slot_count,
+                self._slots.limit,
             )
 
     def _stop_departed(self, want: dict[str, Connection]) -> None:

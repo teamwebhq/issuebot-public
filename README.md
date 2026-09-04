@@ -243,7 +243,7 @@ Core keys:
 | Key | Default | Meaning |
 |---|---|---|
 | `harness` | — | Agent CLI that does the work. **Necessary** only if more than one harness is installed |
-| `max_concurrent` | `1` | Maximum number of tasks that issuebot does at the same time for all connections. Restart issuebot after a change |
+| `max_concurrent` | `1` | Maximum number of tasks that issuebot does at the same time for each harness, for all connections. At `2`, issuebot does two `claude` tasks and two `ollama` tasks at the same time. Restart issuebot after a change |
 | `task_timeout_minutes` | not set | Maximum time for one run. If not set, there is no maximum |
 | `connections` | `[]` | Connections, with one array-of-tables entry for each connection |
 
@@ -777,7 +777,7 @@ To configure the connection manually, or in a script:
 
 ```toml
 harness = "claude"
-max_concurrent = 3          # railway tasks at the same time (default 1 = one task)
+max_concurrent = 3          # railway tasks at the same time, for each harness (default 1)
 
 [issuebear]
 api_url = "https://issuebear.example.com/api"
@@ -816,9 +816,9 @@ You can use local connections and railway connections in one configuration. The
 - **Warm starts** — the first run for a project caches a checkpoint with the
   repository and the installed dependencies. Subsequent runs start from the
   checkpoint and fetch the latest commits.
-- **Concurrency** — issuebot runs a maximum of `max_concurrent` tasks at the
-  same time, each one in its own sandbox. Your Railway plan can set a lower
-  maximum.
+- **Concurrency** — issuebot runs a maximum of `max_concurrent` tasks for each
+  harness at the same time, each one in its own sandbox. Your Railway plan can
+  set a lower maximum.
 - **Pause and resume** — if a run ends with `needs_input`, issuebot writes a
   checkpoint and deletes the sandbox. When the task comes back, the next run
   starts from that checkpoint. On the `claude` harness, the checkpoint also

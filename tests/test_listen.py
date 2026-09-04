@@ -23,7 +23,7 @@ from issuebot.contracts import (
 from issuebot.plugins.environments.base import ExecutionEnvironment
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.plugins.sources.base import ConnectionConflict
-from issuebot.runner import ProjectListener
+from issuebot.runner import HarnessSlots, ProjectListener
 
 _PROJECT = connection()
 
@@ -1533,7 +1533,7 @@ def test_max_concurrent_caps_the_runner_not_each_connection() -> None:
         gate.wait(timeout=5)
         return Response(status="done")
 
-    slots = threading.BoundedSemaphore(1)
+    slots = HarnessSlots(1)
     listeners = [
         ProjectListener(
             wiring(
@@ -1562,6 +1562,50 @@ def test_max_concurrent_caps_the_runner_not_each_connection() -> None:
             thread.join(timeout=5)
 
 
+def test_the_cap_is_per_harness() -> None:
+    """`max_concurrent` is a budget per harness, not one shared pot. At a limit
+    of 1, an item the board sent to `ollama` runs beside one on this install's
+    own `fake` harness — where the same two items on one harness queue up (see
+    `test_max_concurrent_caps_the_runner_not_each_connection`)."""
+    started = threading.Semaphore(0)
+    gate = threading.Event()
+
+    def on_run(work, run_id, cancel):
+        started.release()
+        gate.wait(timeout=5)
+        return Response(status="done")
+
+    # One shared budget, exactly as the Supervisor hands every listener the same
+    # object. The board names a harness on the second item only, so the two draw
+    # on different buckets of it.
+    slots = HarnessSlots(1)
+    listeners = [
+        ProjectListener(
+            wiring(
+                _PROJECT,
+                api=_ConcurrentApi([_work_item(f"t{i}", f"ISS-{i}", harness=named)]),
+                environment=StubEnvironment(on_run=on_run),
+            ),
+            wait_timeout=1,
+            slots=slots,
+        )
+        for i, named in ((1, None), (2, "ollama"))
+    ]
+
+    threads = [threading.Thread(target=lis.run, daemon=True) for lis in listeners]
+    for thread in threads:
+        thread.start()
+    try:
+        assert started.acquire(timeout=5)
+        assert started.acquire(timeout=5), "the other harness waited on a budget that is not its"
+    finally:
+        gate.set()
+        for lis in listeners:
+            lis.stop()
+        for thread in threads:
+            thread.join(timeout=5)
+
+
 def test_a_slot_is_freed_when_the_claim_is_lost() -> None:
     """A slot is taken before claiming, so the path where nothing was claimed
     has to give it back — or the runner quietly loses capacity per lost race."""
@@ -1573,7 +1617,7 @@ def test_a_slot_is_freed_when_the_claim_is_lost() -> None:
         def claim(self, work):
             return None
 
-    slots = threading.BoundedSemaphore(1)
+    slots = HarnessSlots(1)
     listener = ProjectListener(
         wiring(
             _PROJECT,
@@ -1586,7 +1630,7 @@ def test_a_slot_is_freed_when_the_claim_is_lost() -> None:
 
     listener._process(_work_item())
 
-    assert slots.acquire(blocking=False), "the slot was never given back"
+    assert slots.acquire("fake", timeout=0), "the slot was never given back"
 
 
 def test_holding_the_runner_waits_for_a_run_and_stops_new_claims() -> None:
@@ -1604,7 +1648,7 @@ def test_holding_the_runner_waits_for_a_run_and_stops_new_claims() -> None:
         return Response(status="done")
 
     api = _ConcurrentApi([_work_item("t1", "ISS-1")])
-    slots = threading.BoundedSemaphore(1)
+    slots = HarnessSlots(1)
     listener = ProjectListener(
         wiring(_PROJECT, api=api, environment=StubEnvironment(on_run=on_run)),
         wait_timeout=1,
@@ -1612,7 +1656,7 @@ def test_holding_the_runner_waits_for_a_run_and_stops_new_claims() -> None:
     )
 
     sup = Supervisor(RecordingApi(), FakeHarness(0), "/tmp/none.toml")
-    sup._slots, sup._slot_count = slots, 1
+    sup._slots = slots
 
     thread = threading.Thread(target=listener.run, daemon=True)
     thread.start()
@@ -1646,8 +1690,8 @@ def test_work_arriving_at_the_limit_is_held_until_a_slot_frees() -> None:
     """The board does not redeliver: a task assigned to this agent is simply
     assigned, and coming to get it is issuebot's job. Skipping at the limit
     silently lost the task until a human touched it."""
-    slots = threading.BoundedSemaphore(1)
-    assert slots.acquire(blocking=False)  # the runner is busy elsewhere
+    slots = HarnessSlots(1)
+    assert slots.acquire("fake", timeout=0)  # the runner is busy elsewhere
 
     api = ScriptedApi(_work_item())
     listener = ProjectListener(
@@ -1661,7 +1705,7 @@ def test_work_arriving_at_the_limit_is_held_until_a_slot_frees() -> None:
         time.sleep(0.3)
         assert api.claims == []  # held, not claimed — the slot is not ours yet
 
-        slots.release()  # the other run finishes
+        slots.release("fake")  # the other run finishes
         assert _wait(lambda: api.claims == ["t1"], 3.0), "the held item was never run"
         assert api.released.wait(timeout=3)
     finally:
@@ -1671,8 +1715,8 @@ def test_work_arriving_at_the_limit_is_held_until_a_slot_frees() -> None:
 
 def test_stop_releases_a_listener_waiting_for_a_slot() -> None:
     """The wait must notice stop(), or shutdown hangs behind a busy runner."""
-    slots = threading.BoundedSemaphore(1)
-    assert slots.acquire(blocking=False)
+    slots = HarnessSlots(1)
+    assert slots.acquire("fake", timeout=0)
 
     api = ScriptedApi(_work_item())
     listener = ProjectListener(
