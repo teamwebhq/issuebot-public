@@ -196,17 +196,32 @@ def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str, bool]
         return None
 
 
-def _change(repo: str, folder: str, changes: Changes, number: int | None) -> str:
+def _base_branch(proc: Process, repo: str) -> str:
+    """The branch a new pull request opens against: the repository's default.
+
+    ``gh pr create`` is never given a ``--base``, so this is the branch it
+    targets, and therefore the far end of everything a new pull request will
+    contain. Empty when ``gh`` cannot say, which the caller falls back from.
+    """
+    result = proc.run(
+        ["gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"]
+    )
+    return result.out.strip() if result.ok else ""
+
+
+def _change(proc: Process, repo: str, folder: str, changes: Changes, number: int | None) -> str:
     """Prose telling the summarizer where the change it must describe is.
 
     Handed to the harness whole: the harness carries it into its prompt and
     never reads it, so knowing how a GitHub change is looked at stays here with
     the rest of this sink's forge knowledge.
 
-    An existing pull request is described from the *whole* pull request, not
-    from this run's slice of it. On a second run ``changes.base_sha`` is the
-    first run's tip, so the range below would describe only the increment while
-    the reviewer reads the lot.
+    Either way the description covers the *whole* pull request, never this
+    run's slice of it. ``changes.base_sha`` is the branch tip ``prepare``
+    recorded, so on any run after the first it is the previous run's tip: a
+    range starting there describes only the increment while the reviewer reads
+    the lot. An existing pull request is read as itself; a branch that has none
+    yet is read against the branch the new pull request will open against.
 
     A checkout answers without the network; a clone-based or sandboxed
     connection keeps none on this machine, so it is named a ``gh`` command
@@ -222,7 +237,12 @@ def _change(repo: str, folder: str, changes: Changes, number: int | None) -> str
             f"{' and '.join(commands)}."
         )
 
-    span = f"{changes.base_sha}...{changes.head_sha}"
+    # The base branch names the whole branch; the recorded sha is the fallback
+    # when `gh` cannot name it, and an increment described is better than no
+    # description at all.
+    base = _base_branch(proc, repo)
+    span = f"{base or changes.base_sha}...{changes.head_sha}"
+
     if folder:
         return (
             f"The change is the git range `{span}` in the current directory. "
@@ -554,7 +574,7 @@ class GitHubSink(Sink):
             delivery.folder,
             changes,
             delivery.output.summary,
-            change=_change(repo, delivery.folder, changes, existing[0] if existing else None),
+            change=_change(proc, repo, delivery.folder, changes, existing[0] if existing else None),
             harness=self._harness,
             model=self._summary_model,
             guidance=delivery.guidance,

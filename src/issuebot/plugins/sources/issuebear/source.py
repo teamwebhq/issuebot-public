@@ -6,6 +6,7 @@ work item, built on top of the thin REST client in ``client.py``.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Any, ClassVar, Protocol
 
@@ -48,9 +49,22 @@ _ASSIGNMENT_PERMITS: frozenset[OutputKind] = frozenset(
 )
 _MENTION_PERMITS: frozenset[OutputKind] = frozenset({"answer", "needs_input", "handoff"})
 
+# How hard the runner tries to borrow a git credential from the board. The
+# board can be away for a few seconds — a deploy, a restart, a proxy hiccup —
+# and the borrow happens again just before the push, where the fallback is the
+# token the run started with: a run longer than that token's hour falls back on
+# a dead credential and the push fails. Four attempts with a doubling backoff
+# (2 s, 4 s, 8 s) ride out a restart in about 15 s, which is short enough not to
+# stall a run that is ready to push.
+_BORROW_ATTEMPTS = 4
+_BORROW_BACKOFF_SECONDS = 2.0
+
 # Parade stores a run's summary in a 2,000-character column, and rejects the
 # whole release rather than truncating an over-long one — so the trim happens
-# here, where losing the tail of a summary is all it costs.
+# here, where losing the tail of a summary is all it costs. The number is the
+# board's own: `POST /runs/{id}/release` answers 422 `string_too_long` with
+# `String should have at most 2000 characters` for the `result.summary` field,
+# so a board that moves its column moves this with it.
 _SUMMARY_LIMIT = 2000
 
 
@@ -119,7 +133,9 @@ def _run_result(connection: Connection, response: Response) -> dict[str, Any]:
     A branch is listed whenever the run produced commits, whether or not it
     reached origin — the board is told what the run did, and ``pushed`` says
     separately whether the work left this machine. When the commits stayed
-    here, ``summary`` also gives the reason the workspace recorded.
+    here, ``summary`` also gives the reason the workspace recorded — and that
+    reason keeps its room under `_SUMMARY_LIMIT`, so a long summary gives way
+    to it rather than pushing it off the end.
     """
     summary = ""
     for output in response.deliverables:
@@ -134,13 +150,21 @@ def _run_result(connection: Connection, response: Response) -> dict[str, Any]:
     produced = changes is not None and not changes.empty
     pushed = bool(changes is not None and changes.pushed)
 
-    summary = (summary or response.result_text)[:_SUMMARY_LIMIT]
+    summary = summary or response.result_text
 
     # Commits that never left the machine are the run's own bad news, and this
     # report is where somebody looks next — so it says why, in one sentence,
     # after whatever the agent had to say.
+    reason = ""
     if produced and not pushed and changes is not None and changes.push_detail:
-        summary = f"{summary}\n\nThe branch was not pushed to origin: {changes.push_detail}"
+        reason = f"\n\nThe branch was not pushed to origin: {changes.push_detail}"
+
+    # The cap belongs to what is actually sent, so the whole report is composed
+    # first and trimmed once. The reason keeps its room and the agent's words
+    # give way: the agent's summary is already on the task in full as a comment
+    # (`finish`), the reason is nowhere else. A reason longer than the limit on
+    # its own is trimmed too, so nothing over the limit ever leaves here.
+    summary = (summary[: max(_SUMMARY_LIMIT - len(reason), 0)] + reason)[:_SUMMARY_LIMIT]
 
     result: dict[str, Any] = {
         "summary": summary,
@@ -771,6 +795,42 @@ class Issuebear(Source):
 
     # -- the ForgeAuth capability --------------------------------------------
 
+    def _borrow_credentials(self, task_id: str, ref: str) -> dict[str, Any] | None:
+        """Ask the board for this task's git credentials, through a short board
+        outage.
+
+        A transient failure (:func:`~issuebot.transient.is_transient` — a
+        restart, a gateway, a dropped connection) is waited out and asked again,
+        up to ``_BORROW_ATTEMPTS`` times. Anything else is the board's real
+        answer and is raised at once.
+
+        Raises what the last attempt raised, so the caller reports one failure
+        for the whole borrow rather than one per attempt.
+        """
+        for attempt in range(1, _BORROW_ATTEMPTS):
+            try:
+                return self._client.git_credentials(task_id)
+
+            except Exception as exc:  # noqa: BLE001 - only a transient failure is retried
+                if not is_transient(exc):
+                    raise
+
+                delay = _BORROW_BACKOFF_SECONDS * 2 ** (attempt - 1)
+                logger.info(
+                    "borrow of git credentials for %s deferred (%s); "
+                    "retrying in %.0fs (attempt %d of %d)",
+                    ref,
+                    describe_transient(exc),
+                    delay,
+                    attempt,
+                    _BORROW_ATTEMPTS,
+                )
+                time.sleep(delay)
+
+        # The last attempt sits outside the loop: whatever it raises — or
+        # answers — is the result of the borrow.
+        return self._client.git_credentials(task_id)
+
     def forge_env(self, work: WorkItem) -> dict[str, str]:
         """What this run's git and ``gh`` calls authenticate and identify as.
 
@@ -809,12 +869,17 @@ class Issuebear(Source):
         looks exactly like a borrow that worked until a push is refused an hour
         later. The token itself is never logged, in whole or in part.
 
+        The borrow rides out a short board outage (see
+        :meth:`_borrow_credentials`), because the fallback of a failed borrow is
+        the token the run started with — and a run longer than that token's hour
+        falls back on a credential it has already outlived.
+
         Never raises: a board that has nothing to lend, is too old to know the
         endpoint, or cannot be reached leaves the run using the machine's own
         credential, exactly as before this existed.
         """
         try:
-            lent = self._client.git_credentials(work.task_id)
+            lent = self._borrow_credentials(work.task_id, work.ref)
         except Exception as exc:  # noqa: BLE001 - no run fails over a credential we could not borrow
             logger.warning("could not borrow git credentials for %s: %s", work.ref, exc)
             return {}

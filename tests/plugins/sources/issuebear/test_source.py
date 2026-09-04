@@ -24,7 +24,7 @@ from issuebot.contracts import (
 )
 from issuebot.plugins.sources.issuebear import messages
 from issuebot.plugins.sources.issuebear.client import AlreadyClaimed
-from issuebot.plugins.sources.issuebear.source import Issuebear
+from issuebot.plugins.sources.issuebear.source import _SUMMARY_LIMIT, Issuebear
 from issuebot.plugins.workspaces.base import WorkspaceProblem
 
 
@@ -306,6 +306,40 @@ def test_a_report_of_unpushed_work_says_why_the_branch_stayed_here():
     (result,) = api.release_results
     assert "added the endpoint" in result["summary"]
     assert "protected branch hook" in result["summary"]
+
+
+def test_a_long_summary_still_makes_room_for_why_the_branch_stayed_here():
+    """The report the board accepts is the whole thing, so a summary long
+    enough to fill the column gives way to the push failure rather than
+    pushing it off the end — the board rejects an over-long release outright,
+    and the reason is the part nobody can read anywhere else."""
+    api = FakeApi()
+    response = Response(
+        status="done",
+        outputs=[Changed(summary="x" * (_SUMMARY_LIMIT * 2))],
+        changes=_pushed(pushed=False, push_detail="! [remote rejected] protected branch hook"),
+    )
+
+    _source(api).release(Claim(work_id="t1", token="r1"), response)
+
+    (result,) = api.release_results
+    assert len(result["summary"]) <= _SUMMARY_LIMIT
+    assert "protected branch hook" in result["summary"]
+
+
+def test_a_long_summary_from_a_pushed_run_is_trimmed_to_the_column():
+    """Nothing over the column's size is ever sent, push failure or not."""
+    api = FakeApi()
+    response = Response(
+        status="done",
+        outputs=[Changed(summary="x" * (_SUMMARY_LIMIT * 2))],
+        changes=_pushed(),
+    )
+
+    _source(api).release(Claim(work_id="t1", token="r1"), response)
+
+    (result,) = api.release_results
+    assert len(result["summary"]) == _SUMMARY_LIMIT
 
 
 def test_a_run_that_answered_reports_the_answer_and_no_code():

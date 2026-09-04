@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+import pytest
 
 from conftest import FakeApi, FakeWorkspace, RecordingReporter, connection, ctx, wiring, work
 from issuebot import runner
@@ -28,6 +29,7 @@ from issuebot.contracts import Changed, Changes, Delivery, Job, Response, SinkRe
 from issuebot.plugins.environments.base import ExecutionEnvironment
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.plugins.sinks.github.sink import GitHubSink
+from issuebot.plugins.sources.issuebear import source as source_module
 from issuebot.plugins.sources.issuebear.client import IssuebotClient
 from issuebot.plugins.sources.issuebear.source import Issuebear
 from issuebot.process import RealProcess, RecordingProcess
@@ -145,6 +147,56 @@ def test_a_board_that_cannot_answer_never_fails_the_run():
     board = _Board(error=RuntimeError("board unreachable"))
 
     assert _source(board).forge_env(work()) == {}
+
+
+class _FlakyBoard(_Board):
+    """A board that is unreachable for its first few asks, then answers."""
+
+    def __init__(self, failures: int, error: Exception | None = None):
+        super().__init__()
+        self._failures = failures
+        self._flaky_error = error or httpx.ConnectError("board restarting")
+
+    def git_credentials(self, task_id: str) -> dict[str, Any] | None:
+        self.asked.append(task_id)
+        if len(self.asked) <= self._failures:
+            raise self._flaky_error
+        return LENT
+
+
+@pytest.fixture(autouse=True)
+def _no_waiting(monkeypatch):
+    """Retries must not make the suite wait for their backoff."""
+    monkeypatch.setattr(source_module.time, "sleep", lambda seconds: None)
+
+
+def test_a_borrow_survives_a_board_restart():
+    """A board away for a moment still lends: the retry is invisible to the
+    run, which gets the credentials it asked for."""
+    env = _source(_FlakyBoard(failures=1)).forge_env(work())
+
+    assert env["GH_TOKEN"] == "ghs_lent"
+
+
+def test_a_board_away_for_the_whole_borrow_leaves_the_machines_own_credential(caplog):
+    """The retries run out, and the run carries on with what the machine
+    holds — no exception reaches the caller."""
+    board = _FlakyBoard(failures=99)
+
+    with caplog.at_level(logging.WARNING, logger="issuebot"):
+        env = _source(board).forge_env(work())
+
+    assert env == {}
+    assert caplog.records
+
+
+def test_a_real_error_from_the_board_is_not_retried():
+    """Only a transient failure is worth asking again; a genuine error is the
+    board's answer."""
+    board = _Board(error=RuntimeError("board said no"))
+
+    assert _source(board).forge_env(work()) == {}
+    assert len(board.asked) == 1
 
 
 def test_the_client_reads_a_404_as_nothing_to_lend():

@@ -72,6 +72,7 @@ def _happy(**replies: object) -> RecordingProcess:
     for pattern, reply in {
         "gh api": completed(out='{"ahead_by": 3}'),
         "gh pr list": completed(out="[]"),
+        "gh repo view": completed(out="main\n"),
         "gh pr create": completed(out="https://github.com/o/r/pull/9\n"),
     }.items():
         scripted.setdefault(pattern, reply)
@@ -279,6 +280,32 @@ def test_the_description_of_a_second_run_covers_the_whole_pull_request() -> None
     assert "base-sha...head-sha" not in change
 
 
+def test_a_new_pull_request_is_described_from_the_whole_branch() -> None:
+    """The branch can already carry commits from earlier runs while no pull
+    request is open yet (a step that asked for none, or one somebody closed).
+    The pull request then contains the lot, so describing this run's range
+    would describe only its last slice of it."""
+    proc = _happy()
+    harness = FakeHarness(summary="Title: Add the widget")
+
+    GitHubSink(harness=harness, proc=proc).deliver(_delivery())
+
+    change = harness.summarize_calls[0][0]
+    assert "main...head-sha" in change
+    assert "base-sha" not in change
+
+
+def test_the_recorded_base_is_used_when_the_forge_cannot_name_the_default() -> None:
+    """An increment described beats no description at all."""
+    proc = _happy(**{"gh repo view": completed(code=1, err="gh: 404")})
+    harness = FakeHarness(summary="Title: Add the widget")
+
+    result = GitHubSink(harness=harness, proc=proc).deliver(_delivery())
+
+    assert result.ok
+    assert "base-sha...head-sha" in harness.summarize_calls[0][0]
+
+
 def test_a_rewrite_that_fails_still_delivers_and_says_so() -> None:
     """The branch is pushed and the pull request is there to read — a stale
     description is worth reporting, not failing the delivery over."""
@@ -369,7 +396,7 @@ def test_uses_the_harness_summary_when_one_is_available() -> None:
     assert guidance == ""  # the delivery carried none
 
     # No diff is fetched for the summarizer at all — it is told where to look.
-    assert "base-sha...head-sha" in change
+    assert "main...head-sha" in change
     assert not any(c[:2] == ["git", "diff"] for c in proc.calls)
 
     create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
@@ -409,7 +436,7 @@ def test_a_checkout_is_told_to_read_the_change_locally() -> None:
 
     assert result.ok
     change = harness.summarize_calls[0][0]
-    assert "git diff base-sha...head-sha" in change
+    assert "git diff main...head-sha" in change
     assert "gh api" not in change
 
 
@@ -443,7 +470,7 @@ def test_no_checkout_still_gets_the_model_written_description() -> None:
     assert result.summary == "opened PR"
 
     change = harness.summarize_calls[0][0]
-    assert "repos/o/r/compare/base-sha...head-sha" in change
+    assert "repos/o/r/compare/main...head-sha" in change
     assert harness.folder_existed  # a real cwd, never the listener's own
 
     create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
