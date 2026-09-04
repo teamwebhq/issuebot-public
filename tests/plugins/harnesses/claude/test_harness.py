@@ -5,10 +5,14 @@ is Claude-only."""
 from __future__ import annotations
 
 import json
+import sys
+import threading
+import time
 
 from conftest import SpawnRecorder
 from issuebot.plugins.harnesses.base import LaunchSpec
 from issuebot.plugins.harnesses.claude.harness import ClaudeHarness
+from issuebot.process import RealProcess, RecordingProcess
 
 # One server fragment, in the shape a source hands one over. This harness is
 # told nothing about where it came from, which is what makes it worth asserting.
@@ -358,3 +362,101 @@ def test_summarize_weaves_the_boards_guidance_into_the_prompt():
     )
 
     assert "Title in the imperative." in (spawn.stdin or "")
+
+
+# ---------------------------------------------------------------------------
+# A board MCP server that drops out mid-run
+# ---------------------------------------------------------------------------
+
+# What Claude Code itself says when a tool call reaches an MCP server it is no
+# longer attached to. The client says this, not the board: the call never left
+# the machine.
+_MCP_LOST = 'MCP server "issuebear" is not connected'
+
+
+class _RealChild(RecordingProcess):
+    """Runs one real program, whatever argv it is handed.
+
+    The harness builds `claude` command lines, so a real `claude` cannot stand
+    in for the child here — but the cancel ladder is the kernel's, and a double
+    would only prove the double works. This runs a python child instead, and
+    ignores the working directory the launch asks for because that folder
+    belongs to a real run and does not exist in a test.
+    """
+
+    def __init__(self, script: str) -> None:
+        super().__init__()
+        self._argv = [sys.executable, "-c", script]
+
+    def spawn(self, argv, *, on_line, cwd=None, env=None, cancel=None, stdin=None) -> int:
+        """Run the fixed script, streaming and cancelling exactly as the real
+        adapter does."""
+        self.calls.append(list(argv))
+        return RealProcess().spawn(self._argv, on_line=on_line, cancel=cancel)
+
+
+def test_claude_ends_the_run_when_the_board_mcp_drops_out(reporter):
+    """Claude Code never re-attaches a dropped MCP server inside one process, so
+    every later board tool call fails against a connection that cannot recover.
+    The run ends instead, non-zero and retryable, and the ladder in
+    `run._launch_with_retries` resumes it in a fresh process that can attach."""
+    script = f"import time\nprint({_MCP_LOST!r}, flush=True)\ntime.sleep(60)\n"
+    harness = ClaudeHarness(command="claude", proc=_RealChild(script))
+    cancel = threading.Event()
+
+    started = time.monotonic()
+    result = harness.launch(_spec(), reporter, cancel)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 30, "the child outlived the dropped MCP server"
+    assert result.exit_code != 0  # the ladder only retries a non-zero exit
+    assert result.retryable is True
+    assert not cancel.is_set(), "ending the run to reconnect is not the caller's abort"
+
+
+def test_claude_still_honours_the_callers_cancel_on_a_silent_child(reporter):
+    """The run has its own reason to end a launch now, and the caller's abort
+    must still reach a child that has stopped printing — the whole point of a
+    Ctrl-C is a child that says nothing more."""
+    harness = ClaudeHarness(command="claude", proc=_RealChild("import time; time.sleep(60)"))
+    cancel = threading.Event()
+    threading.Timer(0.2, cancel.set).start()
+
+    started = time.monotonic()
+    result = harness.launch(_spec(), reporter, cancel)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 30, "the child outlived its cancellation"
+    assert result.exit_code != 0
+
+
+def test_claude_reads_the_disconnect_off_the_real_stream_json_line(reporter):
+    """The error arrives inside a stream-json tool result, where the server name
+    is escaped (`MCP server \\"issuebear\\" is not connected`). The match has to
+    survive that escaping, which is why it is not one contiguous substring."""
+    tool_result = json.dumps(
+        {
+            "type": "user",
+            "message": {
+                "content": [{"type": "tool_result", "is_error": True, "content": _MCP_LOST}]
+            },
+        }
+    )
+    spawn = SpawnRecorder(exit_code=1, lines=[tool_result, "later"])
+    harness = ClaudeHarness(command="claude", proc=spawn)
+
+    result = harness.launch(_spec(), reporter)
+
+    assert result.retryable is True
+    assert "later" not in reporter.raw_lines  # the run stopped at the disconnect
+
+
+def test_claude_is_not_fooled_by_ordinary_talk_about_connections(reporter):
+    """ "is not connected" on its own is ordinary agent output. Only a line that
+    names an MCP server ends the run."""
+    spawn = SpawnRecorder(exit_code=0, lines=["the database is not connected yet"])
+    harness = ClaudeHarness(command="claude", proc=spawn)
+
+    result = harness.launch(_spec(), reporter)
+
+    assert result.retryable is False

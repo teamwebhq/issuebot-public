@@ -118,3 +118,41 @@ def test_oserror_on_run_is_swallowed(monkeypatch) -> None:
     # Must not propagate the OSError, and should echo a manual-command fallback.
     ensure_claude_mcp(_cfg(), run=bad_run, echo=msgs.append)
     assert any("claude mcp add" in msg for msg in msgs)
+
+
+def test_ollama_install_is_wired_with_the_claude_code_binary(monkeypatch) -> None:
+    """An ollama install runs Claude Code through `ollama launch`, so the user's
+    own Claude Code wants the board just as much — and the program that
+    registers it is Claude Code, never the `ollama` one that starts it."""
+    import issuebot.plugins.harnesses.claude.mcp_setup as m
+
+    monkeypatch.setattr(m.shutil, "which", lambda _name: "/usr/bin/claude")
+    run = _Recorder(get_code=1)  # not registered yet
+    msgs: list[str] = []
+
+    cfg = config(harness="ollama", ollama={"command": "/opt/ollama"})
+    ensure_claude_mcp(cfg, run=run, echo=msgs.append)
+
+    add = next(c for c in run.calls if "add" in c)
+    assert add[0] == "claude"  # resolved on PATH
+    assert "/opt/ollama" not in add
+
+
+def test_ollama_install_uses_the_configured_claude_command(monkeypatch) -> None:
+    """The `[claude]` table still names the Claude Code executable, whichever
+    harness the install runs."""
+    import issuebot.plugins.harnesses.claude.mcp_setup as m
+
+    monkeypatch.setattr(m.shutil, "which", lambda _name: "/usr/bin/claude")
+    run = _Recorder(get_code=1)
+    msgs: list[str] = []
+
+    cfg = config(
+        harness="ollama",
+        ollama={"command": "/opt/ollama"},
+        claude={"command": "/opt/claude"},
+    )
+    ensure_claude_mcp(cfg, run=run, echo=msgs.append)
+
+    add = next(c for c in run.calls if "add" in c)
+    assert add[0] == "/opt/claude"

@@ -20,8 +20,15 @@ import subprocess
 from collections.abc import Callable
 
 from issuebot import plugins
-from issuebot.config import Config, harness_settings, source_plugin
+from issuebot.config import Config, harness_name, harness_settings, source_plugin
 from issuebot.contracts import McpServer
+from issuebot.plugins.base import HarnessPlugin
+from issuebot.plugins.harnesses.claude.harness import ClaudeHarness
+
+# The harness whose executable does the registering. Always Claude Code's own,
+# whichever harness the install runs: a wrapper starts Claude Code, it does not
+# replace it, and `ollama mcp add` is not a command.
+_CLAUDE = "claude"
 
 # Process-callable shape compatible with subprocess.run (we only read returncode).
 Run = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -37,6 +44,26 @@ def _server(cfg: Config) -> McpServer | None:
         return source_plugin().source.user_mcp(cfg)
     except plugins.UnknownPlugin:
         return None
+
+
+def _drives_claude_code(cfg: Config) -> bool:
+    """True when the install's harness runs Claude Code, wrapper or not.
+
+    Asked of the registered harness *class*, not of the harness's name: the
+    ollama harness runs Claude Code through `ollama launch`, so the user's own
+    Claude Code wants the board registered exactly as much as it does for the
+    claude harness — and a later wrapper gets the same answer with no edit here.
+
+    A config this build cannot name a harness for answers False rather than
+    raising. This step is best-effort and must never fail `init`/`doctor`, and
+    an install driving something else has nothing to register anyway.
+    """
+    try:
+        plugin = plugins.get("harnesses", harness_name(cfg))
+    except plugins.UnknownPlugin:
+        return False
+
+    return isinstance(plugin, HarnessPlugin) and issubclass(plugin.harness, ClaudeHarness)
 
 
 def _add_argv(claude: str, server: McpServer) -> list[str]:
@@ -70,18 +97,21 @@ def ensure_claude_mcp(
 ) -> None:
     """Ensure the source's MCP server is registered in the user's Claude Code.
 
-    No-op for non-claude harnesses, and for a source with nothing to register.
-    If ``claude`` is not on PATH, print the manual command and return. If the
-    MCP is already registered, do nothing. Otherwise add it globally
-    (``--scope user``)."""
-    if cfg.harness != "claude":
+    No-op for an install whose harness does not run Claude Code, and for a
+    source with nothing to register. If ``claude`` is not on PATH, print the
+    manual command and return. If the MCP is already registered, do nothing.
+    Otherwise add it globally (``--scope user``)."""
+    if not _drives_claude_code(cfg):
         return
 
     server = _server(cfg)
     if server is None:
         return
 
-    claude = harness_settings(cfg).get("command") or "claude"
+    # The `[claude]` table names Claude Code's executable whatever the install
+    # runs, so it is read by name rather than from the configured harness —
+    # whose `command` is the wrapper's own program on an ollama install.
+    claude = harness_settings(cfg, _CLAUDE).get("command") or _CLAUDE
     if shutil.which(claude) is None:
         manual = " ".join(_add_argv(claude, server))
         echo(

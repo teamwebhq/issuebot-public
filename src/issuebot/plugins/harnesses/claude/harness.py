@@ -27,6 +27,21 @@ logger = logging.getLogger("issuebot")
 # type; either spelling is enough to know a backoff-and-resume is worth trying.
 _RETRYABLE_MARKERS = ("overloaded", "error: 529", "status code 529", "status 529")
 
+# Substrings that together mark a board MCP server the agent can no longer
+# reach. Claude Code says this itself when a tool call finds the server
+# detached — the call never leaves the machine. Both substrings must be
+# present: "is not connected" on its own is ordinary agent output. They are two
+# substrings rather than one because the stream is JSON, which escapes the
+# quotes around the server name.
+#
+# ponytail: an agent that writes this phrase in its own prose ends its run for
+# nothing. It costs one resumed relaunch, not the task, so match the tool_result
+# shape only if it ever actually happens.
+_MCP_LOST_MARKERS = ("mcp server", "is not connected")
+
+# How often the cancel mirror wakes to notice the caller's abort.
+_CANCEL_POLL = 0.3
+
 # This call loads no plugin, so the board's PR-writing guidance can only ever
 # reach it inlined at {guidance} (`summarize`'s own parameter, ultimately
 # `Delivery.guidance`). The output contract stays here rather than in any
@@ -62,6 +77,34 @@ def _is_retryable_error_line(line: str) -> bool:
     """True if ``line`` looks like a transient API overload (529) worth retrying."""
     low = line.lower()
     return any(marker in low for marker in _RETRYABLE_MARKERS)
+
+
+def _is_mcp_lost_line(line: str) -> bool:
+    """True if ``line`` reports an MCP server the agent can no longer reach.
+
+    Claude Code drops a disconnected MCP server for the life of the process and
+    never re-attaches it, so this is not a passing error the agent can retry
+    past: every later board tool call fails the same way. Only a fresh process
+    gets a fresh attachment.
+    """
+    low = line.lower()
+    return all(marker in low for marker in _MCP_LOST_MARKERS)
+
+
+def _mirror_cancel(cancel: threading.Event | None, stop: threading.Event) -> None:
+    """Set ``stop`` once the caller cancels, until ``stop`` ends this thread.
+
+    The spawn is given the launch's own ``stop`` event rather than the caller's,
+    because ending a run to reconnect a dropped MCP server is not the caller's
+    abort — `run._launch_with_retries` reads the caller's event to tell a retry
+    from an interrupt, and a retry that looked like an interrupt would abandon
+    the task. A polling thread rather than a check in ``on_line``: a child that
+    prints nothing more must still be killable.
+    """
+    while not stop.wait(_CANCEL_POLL):
+        if cancel is not None and cancel.is_set():
+            stop.set()
+            return
 
 
 class ClaudeHarness(Harness):
@@ -141,6 +184,21 @@ class ClaudeHarness(Harness):
         cancel: threading.Event | None = None,
     ) -> LaunchResult:
         """Run `claude -p` to completion on one task, streaming its output."""
+        # The spawn is cancelled by this launch's own event, so a dropped board
+        # MCP can end the run without looking like the caller's abort. A daemon
+        # thread carries the caller's cancel across; setting `stop` on the way
+        # out reaps it.
+        stop = threading.Event()
+        threading.Thread(target=_mirror_cancel, args=(cancel, stop), daemon=True).start()
+
+        try:
+            return self._run(spec, reporter, stop)
+        finally:
+            stop.set()  # reap the mirror thread, whatever ended the run
+
+    def _run(self, spec: LaunchSpec, reporter: Reporter, stop: threading.Event) -> LaunchResult:
+        """Spawn `claude -p` and read its stream, ending the run early when the
+        board MCP server drops out. ``stop`` cancels the child."""
         with tempfile.TemporaryDirectory() as tmp:
             mcp_path = Path(tmp) / "mcp.json"
             mcp_path.write_text(json.dumps(spec.mcp_document()))
@@ -148,17 +206,33 @@ class ClaudeHarness(Harness):
 
             captured: dict[str, str | None] = {"session_id": None, "result_text": None}
             retryable = {"hit": False}
+            mcp_lost = {"hit": False}
 
             def on_line(line: str) -> None:
                 """Tee every raw line to the reporter, surface any parsed
                 stream-json event as a feed entry, capture the session id as soon
-                as any event carries one, and note a transient overload. The init
-                event provides the session id up front, so a turn that later
-                aborts on a transient API error still leaves a resumable id
-                behind for the supervisor to back off and resume against."""
+                as any event carries one, note a transient overload, and end the
+                run when the board MCP server drops out. The init event provides
+                the session id up front, so a turn that later aborts on a
+                transient API error still leaves a resumable id behind for the
+                supervisor to back off and resume against."""
                 reporter.raw(line)
                 if _is_retryable_error_line(line):
                     retryable["hit"] = True
+
+                # A dropped board MCP cannot recover in this process, so the run
+                # ends here and the retry ladder resumes it in a new one. Once
+                # only: the agent goes on calling the dead server, and one
+                # warning is the news rather than thirty-five.
+                if not mcp_lost["hit"] and _is_mcp_lost_line(line):
+                    mcp_lost["hit"] = True
+                    retryable["hit"] = True
+                    logger.warning(
+                        "the board MCP server dropped out and Claude Code cannot re-attach "
+                        "it in this process; ending the run so a fresh one can reconnect"
+                    )
+                    stop.set()
+
                 ev = self.parse_line(line)
                 if ev is None:
                     return
@@ -173,7 +247,7 @@ class ClaudeHarness(Harness):
                     reporter.event(ev)
 
             code = self._proc.spawn(
-                argv, on_line=on_line, cwd=spec.folder, env=spec.env, cancel=cancel
+                argv, on_line=on_line, cwd=spec.folder, env=spec.env, cancel=stop
             )
 
         return LaunchResult(
@@ -183,20 +257,13 @@ class ClaudeHarness(Harness):
             result_text=captured["result_text"] or "",
         )
 
-    def summarize(
-        self,
-        *,
-        context: str,
-        change: str,
-        model: str | None,
-        folder: str,
-        guidance: str = "",
-        env: Mapping[str, str] | None = None,
-    ) -> str:
-        """Generate PR text via a read-only, MCP-free `claude -p` that reads the
-        change ``change`` names. Runs in ``folder`` and returns the collected
-        stdout."""
-        prompt = _SUMMARY_PROMPT.format(guidance=guidance, context=context, change=change)
+    def _summary_argv(self, model: str | None) -> list[str]:
+        """The read-only, MCP-free `claude -p` invocation that writes PR text.
+
+        Its own method so a harness that wraps this one in another command
+        (`ollama launch`) can wrap the summary call the same way it wraps the
+        launch, rather than inheriting a command line that names the wrapper
+        where the agent should be."""
         argv = [
             self._command,
             # No prompt argument: `claude -p` reads it from stdin instead, which
@@ -221,6 +288,24 @@ class ClaudeHarness(Harness):
         ]
         if model:
             argv += ["--model", model]
+
+        return argv
+
+    def summarize(
+        self,
+        *,
+        context: str,
+        change: str,
+        model: str | None,
+        folder: str,
+        guidance: str = "",
+        env: Mapping[str, str] | None = None,
+    ) -> str:
+        """Generate PR text via a read-only, MCP-free `claude -p` that reads the
+        change ``change`` names. Runs in ``folder`` and returns the collected
+        stdout."""
+        prompt = _SUMMARY_PROMPT.format(guidance=guidance, context=context, change=change)
+        argv = self._summary_argv(model)
         out: list[str] = []
         code = self._proc.spawn(
             argv,

@@ -16,7 +16,7 @@ issuebot has five plugin axes:
 | **source** | where the tasks come from, and what a run can report | `issuebear` |
 | **workspace** | where issuebot prepares the working copy | `git`, `folder` |
 | **environment** | which machine the agent runs on | `local`, `railway` |
-| **harness** | which agent CLI issuebot starts | `claude` |
+| **harness** | which agent CLI issuebot starts | `claude`, `ollama` |
 | **sink** | where issuebot publishes a result | `github` |
 
 Each plugin can add configuration keys, `issuebot doctor` checks, and commands.
@@ -105,9 +105,10 @@ path. The command finds the API and MCP endpoints from the Issuebear URL. If it
 cannot find them, it prompts for each endpoint. Before it writes the file, the
 command makes sure that the PAT can get work.
 
-For the `claude` harness, `issuebot init` tries to add the board MCP server to
-Claude Code. The command uses the `user` scope. This setup lets you speak to the
-board directly. To skip this setup, use the `--skip-harness-setup` option.
+For a harness that runs Claude Code (`claude` and `ollama`), `issuebot init`
+tries to add the board MCP server to Claude Code. The command uses the `user`
+scope. This setup lets you speak to the board directly. To skip this setup, use
+the `--skip-harness-setup` option.
 
 Run `issuebot connect` without `--name` and `--board` to start the wizard. The
 wizard does these steps:
@@ -251,7 +252,7 @@ you do not give a name, issuebot uses the one installed harness or environment.
 If more than one is installed, issuebot reports this:
 
 ```text
-no harness named, and 2 are installed — set harness = "…" (known: claude, fake)
+no harness named, and 3 are installed — set harness = "…" (known: claude, fake, ollama)
 connection 'web': no environment named, and 2 are installed — set executor = "…" (known: local, railway)
 ```
 
@@ -850,9 +851,19 @@ the `harness` key in the configuration.
   because an unattended runner cannot give approvals, and
   `--output-format stream-json` for the live feed and the log.
 
-`claude` is the only harness `issuebot init` offers, and the only value the
-`harness` key accepts. A Codex harness (`codex exec …`) exists in the
-codebase but is not offered or selectable — see
+- **`ollama`** — the same Claude Code, run against an Ollama model
+  (`ollama launch claude … -- …`). Ollama is the program, thus `[ollama]
+  command` gives the path to Ollama and not to Claude Code. issuebot uses
+  `ollama launch --yes`, because the model menu needs a terminal. All the
+  flags of the `claude` harness come after the `--` separator, thus the agent
+  behaves the same.
+
+If the board MCP server stops during a run, Claude Code cannot connect to it
+again. Thus issuebot stops the agent and starts it again from the same session.
+The new agent process connects to the board again. The log gives the reason.
+
+`issuebot init` offers `claude` and `ollama`. A Codex harness (`codex exec …`)
+exists in the codebase but is not offered or selectable — see
 [Skills, plans and confirmation](#skills-plans-and-confirmation) for why. A
 config left over from before this change that still says `harness = "codex"`
 refuses to load; the error names the setting and tells you to change it to
@@ -865,9 +876,10 @@ harness, it uses its own and logs a warning that names both — a preference set
 on a machine the board cannot see never fails a run. A task that runs on a
 harness other than the install's starts a new agent session, because a stored
 session belongs to the harness that started it. A requested model is
-passed straight through to the `claude` harness's own `--model` flag with no
+passed straight through to the `--model` flag of the harness with no
 matching against anything; an unrecognised name is the harness's own error to
-raise.
+raise. On the `ollama` harness, the model names an Ollama model and goes to
+`ollama launch`. If the board asks for no model, `ollama launch` selects one.
 
 The CLI must be on your `PATH`. `issuebot doctor` examines it. If the CLI is
 not on your `PATH`, give the path at `issuebot init`, or set the path in the
@@ -1140,14 +1152,14 @@ you delete them.
 - **The PAT stays on your machine**, in `~/.config/issuebot/config.toml` with
   the `0600` permissions. The server does not read your configuration. Use a
   dedicated agent PAT that you can revoke, not a personal token.
-- **`ps` can show the PAT during the setup.** On the `claude` harness,
+- **`ps` can show the PAT during the setup.** On a harness that runs Claude Code,
   `issuebot init` runs `claude mcp add --header "Authorization: Bearer <pat>"`,
   which puts the PAT in a command-line argument. This is a risk on a machine
   that more than one person uses.
-- **The agent runs unattended and asks for no approvals.** The `claude` harness
-  uses `--dangerously-skip-permissions`, thus the agent can change files and
-  run commands in its workspace. Use issuebot only with a workspace and a branch
-  that the agent can safely change.
+- **The agent runs unattended and asks for no approvals.** A harness that runs
+  Claude Code uses `--dangerously-skip-permissions`, thus the agent can change
+  files and run commands in its workspace. Use issuebot only with a workspace
+  and a branch that the agent can safely change.
 - **The description agent reads, but does not write.** To write a pull request
   description, the `claude` harness runs a second, separate agent with a
   read-only tool list: it can read files and run `git diff`, `git log`,
