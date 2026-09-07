@@ -841,6 +841,7 @@ class FakeProvider:
         raises: dict[str, Exception] | None = None,
         lines: list[str] | None = None,
         emit_sentinel: bool = True,
+        emit_ready: bool = True,
         result_file: str | None = None,
         installed_version: str | None = None,
         update_exit: int = 0,
@@ -852,6 +853,7 @@ class FakeProvider:
         self._raises = raises or {}
         self._lines = lines or []
         self._emit_sentinel = emit_sentinel
+        self._emit_ready = emit_ready
         self._result_file = result_file
 
         # Which issuebot this sandbox is, as the probe would answer. Defaults to
@@ -879,6 +881,10 @@ class FakeProvider:
     def secret_env(self) -> dict[str, str]:
         self._maybe_raise("secret_env")
         return {"FAKE_SECRET": "s3cret"}
+
+    def tool_paths(self) -> dict[str, str]:
+        """A platform-neutral stand-in for an image that wraps its tools."""
+        return {"git": "/fake/bin/git"}
 
     def create(self, *, env: dict[str, str], checkpoint: str | None = None) -> str:
         self._maybe_raise("create")
@@ -917,6 +923,15 @@ class FakeProvider:
 
         self._maybe_raise("exec_stream")
         self.exec_argv = argv
+
+        # A real worker says this once its workspace is cloned and bootstrapped,
+        # before the agent has done anything — the controller's cue to snapshot
+        # the connection's warm boot.
+        if self._emit_ready:
+            from issuebot.sandbox_protocol import READY_MARKER
+
+            on_line(READY_MARKER)
+
         for line in self._lines:
             on_line(line)
         if self._emit_sentinel:

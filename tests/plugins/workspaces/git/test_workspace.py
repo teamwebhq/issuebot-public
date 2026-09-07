@@ -25,7 +25,6 @@ from issuebot.plugins.workspaces.git.workspace import (
     Git,
     GitWorkspace,
     _branch_name,
-    _needs_provision,
     _resolve_branch,
     _shared_clone_path,
     resolve_clone_root,
@@ -476,45 +475,6 @@ def test_refresh_raises_when_multiple_existing_clones(repo: Path, tmp_path: Path
 # ---------------------------------------------------------------------------
 # The provisioning gate: internal rule, imported honestly
 # ---------------------------------------------------------------------------
-
-
-def test_needs_provision_true_when_marker_absent_then_false_once_stored(tmp_path: Path):
-    """First check (no stored manifest hash) always needs provisioning; an
-    unchanged manifest on the next check does not."""
-    folder = tmp_path / "ws"
-    folder.mkdir()
-    (folder / ".issuebear.toml").write_text('[bootstrap]\nsetup=["echo hi"]\n')
-
-    assert _needs_provision(str(folder)) is True
-    assert _needs_provision(str(folder)) is False
-
-
-def test_needs_provision_true_when_lockfile_changes(tmp_path: Path):
-    """A lockfile-only change (no change to `.issuebear.toml` itself) must still
-    trip the gate — that's the whole point of hashing lockfiles too."""
-    folder = tmp_path / "ws"
-    folder.mkdir()
-    (folder / "uv.lock").write_text("v1")
-
-    assert _needs_provision(str(folder)) is True
-    assert _needs_provision(str(folder)) is False
-
-    (folder / "uv.lock").write_text("v2")
-    assert _needs_provision(str(folder)) is True
-
-
-def test_needs_provision_marker_stays_out_of_the_working_tree(repo: Path):
-    """The manifest-hash marker must never land in the working tree: a stray
-    file there is picked up by `commit_and_push`'s `git add -A` and committed
-    into the task branch (and makes an otherwise-empty run look dirty)."""
-    (repo / "uv.lock").write_text("v1")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "lock")
-
-    assert _needs_provision(str(repo)) is True
-
-    assert _git(repo, "status", "--porcelain") == ""
-    assert _needs_provision(str(repo)) is False
 
 
 # ---------------------------------------------------------------------------

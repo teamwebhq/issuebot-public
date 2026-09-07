@@ -170,12 +170,13 @@ def run_one(
     reporter = ConsoleReporter(ref=work.ref)
     ctx = RunnerContext.from_config(cfg, store=session_store(harness), agent_id=wire.agent_id)
 
-    # A warm boot inherits a working copy some earlier task left in the project
-    # checkpoint, and only the workspace that placed it knows how to bring it to
-    # this task's ref — so it is asked, through the same factory `run_work` uses
-    # a moment later. A workspace with nothing to top up (or a cold boot, or a
-    # resume, whose copy is already this task's own branch mid-work) does
-    # nothing: the ordinary prep is idempotent over both.
+    # A warm boot inherits the bootstrapped working copy an earlier task's
+    # sandbox was snapshotted with, sitting at whatever ref that task was on,
+    # and only the workspace that placed it knows how to bring it to this task's
+    # ref — so it is asked, through the same factory `run_work` uses a moment
+    # later. A workspace with nothing to top up (or a cold boot, or a resume,
+    # whose copy is already this task's own branch mid-work) does nothing: the
+    # ordinary prep is idempotent over both.
     if wire.boot is BootMode.WARM:
         workspace, _ = runner.workspace_for(connection, ctx)
         workspace.refresh(connection, work.ref, reporter=reporter)

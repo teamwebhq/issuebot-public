@@ -37,7 +37,6 @@ imports both names back from here, so its prune path is unchanged.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 import time
@@ -56,7 +55,7 @@ from issuebot.forge import (
 from issuebot.plugins.workspaces.base import Prepared, Workspace, WorkspaceProblem
 from issuebot.plugins.workspaces.git.settings import Settings
 from issuebot.process import REAL, Completed, Process
-from issuebot.state import StateFile, private_dir, state_dir
+from issuebot.state import private_dir, state_dir
 
 logger = logging.getLogger("issuebot")
 
@@ -792,53 +791,6 @@ def _refresh_workspace(
     return str(new_path)
 
 
-# ---------------------------------------------------------------------------
-# Whether the workspace still needs provisioning
-# ---------------------------------------------------------------------------
-
-# Dependency-manifest files that decide whether a warm workspace's
-# .issuebear.toml provisioning needs to re-run: the bootstrap declaration itself
-# plus every lockfile flavour we know about. Deliberately broader than any one
-# ecosystem, since a connection's repo could use any of them.
-_MANIFEST_FILES = (
-    provision.FILENAME,
-    "uv.lock",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "poetry.lock",
-    "Cargo.lock",
-    "Gemfile.lock",
-)
-_MANIFEST_HASH_FILE = ".issuebot-manifest-hash"
-
-
-def _manifest_hash(folder: str) -> str:
-    """A stable hash over whichever manifest files are present in ``folder``."""
-    digest = hashlib.sha256()
-    for name in _MANIFEST_FILES:
-        path = Path(folder) / name
-        if path.exists():
-            digest.update(name.encode())
-            digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
-def _manifest_marker(g: Git) -> Path:
-    """Where the manifest hash is stored — ``<git-dir>/.issuebot-manifest-hash``.
-
-    Deliberately NOT in the working tree: a marker there is swept up by
-    :func:`commit`'s ``git add -A`` and committed onto the task branch, and its
-    mere presence makes an otherwise-untouched workspace look dirty. Mirrors
-    :func:`issuebot.provision._marker_path`, which keeps its own marker in the git
-    dir for exactly this reason. Falls back to the folder for a non-git directory,
-    where there is no commit to pollute."""
-    r = g.git("rev-parse", "--absolute-git-dir")
-    if r.ok and r.out.strip():
-        return Path(r.out.strip()) / _MANIFEST_HASH_FILE
-    return Path(g.folder) / _MANIFEST_HASH_FILE
-
-
 def is_git_worktree(folder: str, *, proc: Process = REAL) -> bool:
     """True when ``folder`` is inside a git working tree.
 
@@ -848,23 +800,6 @@ def is_git_worktree(folder: str, *, proc: Process = REAL) -> bool:
     thing it needs — is defined in this module."""
     r = Git(folder, proc).git("rev-parse", "--is-inside-work-tree")
     return r.ok and r.out.strip() == "true"
-
-
-def _needs_provision(folder: str, *, proc: Process = REAL) -> bool:
-    """True when this workspace's dependency manifest changed since it was last
-    provisioned — or has never been provisioned at all.
-
-    Records the new hash as a side effect, so repeated warm boots of the same
-    checkpoint answer False without re-running setup."""
-    marker = StateFile(_manifest_marker(Git(folder, proc)))
-    current = _manifest_hash(folder)
-
-    stored = marker.read_text()
-    if stored is not None and stored.strip() == current:
-        return False
-
-    marker.write_text(current)
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1098,9 +1033,10 @@ class GitWorkspace(Workspace):
 
         The warm-boot top-up: :func:`_refresh_workspace` moves and resets the
         clone so the :meth:`prepare` that follows finds an up-to-date checkout,
-        and the repo's bootstrap re-runs only when the dependency manifest moved
-        since the checkpoint was taken — the run's own provisioning call then
-        finds nothing left to do.
+        then :func:`issuebot.provision.provision` re-runs the repo's bootstrap
+        if — and only if — its table or its dependency manifests moved on since
+        the checkpoint was taken. The run's own provisioning call a moment later
+        then finds nothing left to do.
 
         A diverged branch is not this hook's to report: the worker calls it
         bare, so raising would kill the sandbox run with no result at all. The
@@ -1115,8 +1051,12 @@ class GitWorkspace(Workspace):
             logger.info("refresh met a diverged branch %s; deferring to prepare", exc.branch)
             folder = exc.folder
 
-        if _needs_provision(folder, proc=proc):
-            provision.provision(folder, reporter=reporter)
+        # Unconditional: `provision` holds the marker that decides, and it
+        # decides on both halves — the bootstrap table and the manifests its
+        # commands install from. A second opinion here was the bug: it called
+        # `provision` for a moved lockfile, which then matched its own
+        # table-only hash and skipped the setup that had to re-run.
+        provision.provision(folder, reporter=reporter)
 
     def prepare(
         self, connection: Connection, ref: str, *, settings: BaseModel, proc: Process = REAL

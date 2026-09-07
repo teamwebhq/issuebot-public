@@ -21,6 +21,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 from issuebot.contracts import McpServer
+from issuebot.process import resolved
 from issuebot.reporter import Reporter
 from issuebot.state import StateFile, state_dir
 
@@ -41,7 +42,9 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     full = {**os.environ, **(env or {})}
     try:
-        return subprocess.run(args, cwd=cwd, text=True, capture_output=True, env=full)
+        # `resolved` so a sandbox's agent-safety `git` wrapper does not answer
+        # for issuebot's own bootstrap commands (see :mod:`issuebot.process`).
+        return subprocess.run(resolved(args), cwd=cwd, text=True, capture_output=True, env=full)
     except (FileNotFoundError, NotADirectoryError) as exc:
         return subprocess.CompletedProcess(args, returncode=127, stdout="", stderr=str(exc))
 
@@ -81,10 +84,56 @@ def load_bootstrap(folder: str) -> BootstrapConfig | None:
         raise RuntimeError(f"{FILENAME} is invalid: {exc}") from exc
 
 
-def _hash(cfg: BootstrapConfig) -> str:
-    """A stable hash of the bootstrap config; the marker stores it so setup re-runs
-    only when the [bootstrap] table actually changes."""
-    return hashlib.sha256(json.dumps(cfg.model_dump(), sort_keys=True).encode()).hexdigest()
+# Dependency manifests whose contents decide whether an already-provisioned
+# workspace needs its setup commands run again.
+#
+# The bootstrap table says *how* to install; these say *what*. Hashing only the
+# table is the mistake that looks right: a warm workspace whose lockfile moved
+# on has the same table and stale dependencies, and skips the one step that
+# would fix it.
+#
+# Deliberately broader than any one ecosystem — a connection's repo could use
+# any of them — and a repo with none of them simply hashes to its table alone.
+#
+# ponytail: the repository root only. A monorepo that keeps its lockfiles in
+# per-package directories needs the paths declared, which is when `[bootstrap]`
+# should grow an explicit `inputs` list rather than this growing a walk.
+MANIFEST_FILES = (
+    "uv.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "requirements.txt",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lockb",
+    "Cargo.lock",
+    "go.sum",
+    "Gemfile.lock",
+    "composer.lock",
+    "mix.lock",
+    "pubspec.lock",
+)
+
+
+def _hash(cfg: BootstrapConfig, folder: str) -> str:
+    """A stable hash of what this workspace's provisioning depends on: the
+    [bootstrap] table, and the contents of every manifest in
+    :data:`MANIFEST_FILES` that the workspace has.
+
+    The marker stores it, so setup re-runs when either half moves — the commands
+    changed, or what they install did. Each file's name goes into the digest with
+    its bytes, so adding an empty lockfile is still a change.
+    """
+    digest = hashlib.sha256(json.dumps(cfg.model_dump(), sort_keys=True).encode())
+
+    for name in MANIFEST_FILES:
+        path = Path(folder) / name
+        if path.is_file():
+            digest.update(name.encode())
+            digest.update(path.read_bytes())
+
+    return digest.hexdigest()
 
 
 def _marker_path(folder: str, run: Runner) -> Path:
@@ -133,7 +182,7 @@ def provision(folder: str, *, reporter: Reporter, run: Runner = _run) -> Provisi
 
     if cfg.setup:
         marker = _marker_path(folder, run)
-        want = _hash(cfg)
+        want = _hash(cfg, folder)
         if _marker_hash(marker) != want:
             _run_setup(cfg, folder, reporter, run)
             _write_marker(marker, want)

@@ -12,7 +12,8 @@ protocol, the reporter lifecycle, the checkpoint policy and the teardown
 guarantees.
 
 Provider-neutrality is a property of what is *absent* from this module
-(ADR-0002): secrets are :meth:`SandboxProvider.secret_env`, asked of the
+(ADR-0002): secrets are :meth:`SandboxProvider.secret_env` and the real path of
+a tool the image wraps is :meth:`SandboxProvider.tool_paths`, both asked of the
 provider at boot, never spelled here in any provider's own syntax.
 """
 
@@ -32,8 +33,10 @@ from issuebot.contracts import Job, NeedsInput, Response, WorkItem
 from issuebot.events import AgentEvent
 from issuebot.plugins.environments.base import ExecutionEnvironment
 from issuebot.plugins.sources.base import SandboxLifecycle
+from issuebot.process import tool_env
 from issuebot.reporter import Reporter
 from issuebot.sandbox_protocol import (
+    READY_MARKER,
     RESULT_FILE,
     RESULT_MARKER,
     BootMode,
@@ -83,6 +86,19 @@ class SandboxProvider(Protocol):
         pass real values returns real values; one whose image already carries
         them returns ``{}``. The controller merges the answer into the sandbox's
         environment and never looks at it.
+        """
+        ...
+
+    def tool_paths(self) -> dict[str, str]:
+        """Absolute paths for tools issuebot runs itself, where this platform's
+        image does not leave the real one first on PATH.
+
+        An image may shadow `git` or `gh` with a restricted wrapper, so that an
+        agent loose in the sandbox cannot do as it likes with it — Railway
+        ships `safe-git` and `safe-gh`. issuebot is not the agent and needs the
+        real tool. Only the platform knows its own image, so only the platform
+        can name the path; a provider that wraps nothing returns ``{}`` and
+        every tool resolves by name as usual.
         """
         ...
 
@@ -209,8 +225,10 @@ class SandboxEnvironment(ExecutionEnvironment):
             elif shared in existing:
                 mode, checkpoint = BootMode.WARM, shared
 
-        # The provider names its own secrets; the wire carries everything else.
+        # The provider names its own secrets and its own tool paths; the wire
+        # carries everything else.
         env = dict(self._provider.secret_env())
+        env.update(tool_env(self._provider.tool_paths()))
         env.update(
             WorkerEnv.for_run(
                 self._ctx,
@@ -377,26 +395,62 @@ class SandboxEnvironment(ExecutionEnvironment):
             return
         task_checkpoints.record(work.task_id)
 
+    def _warm_project(self, boot: Boot) -> None:
+        """Snapshot the prepared workspace as this connection's warm boot.
+
+        Taken when the worker reports the workspace ready — cloned, bootstrapped,
+        nothing done in it — so what every later task starts from is a prepared
+        workspace and never one task's work. That is the whole value of this
+        checkpoint: not a fresher repo (a warm boot fetches and resets anyway)
+        but the repo's ``[bootstrap]`` setup already run and its dependencies
+        already installed, which is the expensive part of a cold start.
+
+        Only from a cold boot: a warm one came from this checkpoint already, and
+        a resumed one holds one task's own state, which must not become anyone
+        else's start.
+
+        ponytail: runs in the stream loop, so reading the worker's output pauses
+        for as long as the snapshot takes. Deliberate — the alternative is a
+        thread racing the teardown that destroys the sandbox under it — and it
+        costs nothing at the moment it happens, where the agent has barely
+        started talking.
+        """
+        if not self._provider.supports_checkpoints or boot.mode is not BootMode.COLD:
+            return
+
+        try:
+            self._provider.create_checkpoint(boot.sandbox_id, project_checkpoint(self._project))
+        except Exception:  # noqa: BLE001 - warming is best-effort
+            logger.warning("project checkpoint failed for %s", boot.sandbox_id, exc_info=True)
+
     def _checkpoint_decision(self, boot: Boot, job: Job, response: Response) -> None:
         """End-of-run checkpoint bookkeeping, deterministic on the response.
 
-        Work that ended waiting on a human keeps its own checkpoint (see
-        :meth:`_keep_for_resume`) and stops there — the sandbox holds one task's
-        half-finished branch, which must not become anyone else's warm boot.
+        A run that leaves state worth resuming into keeps its *own* checkpoint
+        (see :meth:`_keep_for_resume`) and stops there. Two ways that happens,
+        and the same thing is true of both: the sandbox holds one task's
+        part-finished branch, which is the best start for that task's next
+        attempt and must never become another task's warm boot.
 
-        Otherwise this clears the task's checkpoint (there is nothing left to
-        resume into) and, on a genuinely cold run that could have changed the
-        workspace, populates the shared project checkpoint so the next run boots
-        warm. A resumed sandbox is never folded into it, for the same
-        one-task's-state reason; neither is read-only work, which leaves nothing
-        behind worth caching.
+        * It stopped to ask a human — a ``needs_input`` output.
+        * It did not finish — failed, aborted or timed out — having been
+          permitted to change things. The work up to the failure is exactly
+          what a retry should not have to redo.
+
+        Only a run that actually finished clears the task's checkpoint — there
+        is nothing left to resume into. The connection's shared warm boot is not
+        decided here at all: :meth:`_warm_project` takes it mid-run, at the one
+        moment the workspace holds a bootstrap result and no work.
         """
         if not self._provider.supports_checkpoints:
             return
 
         work = job.work
 
-        if any(isinstance(output, NeedsInput) for output in response.outputs):
+        asked = any(isinstance(output, NeedsInput) for output in response.outputs)
+        unfinished = response.status != "done" and "changes" in job.permits
+
+        if asked or unfinished:
             self._keep_for_resume(boot, work)
             return
 
@@ -407,16 +461,6 @@ class SandboxEnvironment(ExecutionEnvironment):
         except Exception:  # noqa: BLE001 - deletion is best-effort
             logger.warning("task checkpoint delete failed", exc_info=True)
         task_checkpoints.forget(work.task_id)
-
-        if (
-            boot.mode is BootMode.COLD
-            and "changes" in job.permits
-            and response.status in ("done", "failed")
-        ):
-            try:
-                self._provider.create_checkpoint(boot.sandbox_id, project_checkpoint(self._project))
-            except Exception:  # noqa: BLE001 - warming is best-effort
-                logger.warning("project checkpoint failed for %s", boot.sandbox_id, exc_info=True)
 
     def _destroy(self, sandbox_id: str, run_id: str) -> None:
         """Best-effort teardown. Never raises — it runs in a ``finally``, where a
@@ -442,12 +486,14 @@ class SandboxEnvironment(ExecutionEnvironment):
         ref: str,
         reporter: Reporter,
         cancel: threading.Event | None,
+        on_ready: Callable[[], None],
     ) -> tuple[RunResult | None, int]:
         """Exec the worker and recover its result.
 
-        Streams stdout to the reporter while watching for the sentinel line,
-        falling back to the result file when the sentinel never arrived (the
-        worker was cut off mid-flush).
+        Streams stdout to the reporter while watching for two machine-only
+        lines: the sentinel carrying the result, and the worker's ready line,
+        which calls ``on_ready``. Falls back to the result file when the
+        sentinel never arrived (the worker was cut off mid-flush).
 
         The reporter is driven through its full ``start`` → ``event``/``raw`` →
         ``finish`` lifecycle, exactly like a local run: a ``ConsoleReporter``
@@ -461,6 +507,9 @@ class SandboxEnvironment(ExecutionEnvironment):
 
         def on_line(line: str) -> None:
             reporter.raw(line)
+            if line.startswith(READY_MARKER):
+                on_ready()
+                return
             if line.startswith(RESULT_MARKER):
                 parsed = parse_sentinel(line)
                 if parsed is not None:
@@ -562,6 +611,7 @@ class SandboxEnvironment(ExecutionEnvironment):
                 ref=work.ref,
                 reporter=reporter,
                 cancel=cancel,
+                on_ready=lambda: self._warm_project(booted),
             )
             response = (
                 result.to_response()

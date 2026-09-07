@@ -259,7 +259,12 @@ def test_execing_streams_the_command_output():
 
 
 def test_listing_checkpoints_returns_their_names():
-    payload = json.dumps([{"name": "project-p"}, {"name": "task-t1"}])
+    payload = json.dumps(
+        [
+            {"id": "cp_1", "key": "project-p", "createdAt": "now"},
+            {"id": "cp_2", "key": "task-t1", "createdAt": "now"},
+        ]
+    )
     proc = RecordingProcess(replies={"checkpoint list": completed(out=payload)})
     assert _provider(proc).list_checkpoints() == ["project-p", "task-t1"]
 
@@ -267,6 +272,12 @@ def test_listing_checkpoints_returns_their_names():
 def test_no_checkpoints_at_all():
     proc = RecordingProcess(replies={"checkpoint list": completed(out="")})
     assert _provider(proc).list_checkpoints() == []
+
+
+def test_the_image_wraps_git_and_gh_so_the_provider_names_the_real_ones():
+    """The wrappers shadow /usr/bin from /usr/local/bin, and issuebot is not the
+    agent they are there to restrain."""
+    assert _provider().tool_paths() == {"git": "/usr/bin/git", "gh": "/usr/bin/gh"}
 
 
 def test_creating_and_deleting_a_checkpoint():

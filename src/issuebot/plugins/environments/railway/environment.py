@@ -115,6 +115,18 @@ def ensure_tool_step(tool: str, install: str) -> str:
     return f"command -v {tool} >/dev/null 2>&1 || {{ {install}; }}"
 
 
+# Where the real `git` and `gh` live in a Railway sandbox.
+#
+# The image ships `safe-git` and `safe-gh` wrappers in /usr/local/bin, ahead of
+# Debian's own binaries in /usr/bin, to keep an agent from doing as it likes
+# with either. issuebot has to reach past them: its clone, its push and its
+# pull request are not the agent's doing.
+#
+# Absolute paths rather than a PATH edit, because PATH is inherited: dropping
+# /usr/local/bin would take the wrapper away from the agent too, and the agent
+# is the one process that should have it.
+UNWRAPPED_TOOLS = {"git": "/usr/bin/git", "gh": "/usr/bin/gh"}
+
 # How long a sandbox may sit idle before Railway reclaims it.
 _IDLE_TIMEOUT_MINUTES = 120
 
@@ -231,6 +243,10 @@ class RailwayProvider:
         already carries them."""
         return {name: f"${{{{shared.{name}}}}}" for name in _SHARED_SECRETS}
 
+    def tool_paths(self) -> dict[str, str]:
+        """The real `git` and `gh`, past the image's agent-safety wrappers."""
+        return dict(UNWRAPPED_TOOLS)
+
     def create(self, *, env: dict[str, str], checkpoint: str | None = None) -> str:
         """Create a sandbox and return its id.
 
@@ -278,9 +294,14 @@ class RailwayProvider:
         self._check("sandbox", "destroy", sandbox_id)
 
     def list_checkpoints(self) -> list[str]:
-        """Every checkpoint name that exists in this Railway project."""
+        """Every checkpoint name that exists in this Railway project.
+
+        The CLI lists ``{id, key, createdAt, environmentId}`` per checkpoint —
+        the name a checkpoint was created under is ``key``, not ``name``. An
+        entry without one is skipped rather than raising, so one unexpected
+        row cannot stop every task from booting."""
         out = self._check("sandbox", "checkpoint", "list", "--json")
-        return [c["name"] for c in json.loads(out or "[]")]
+        return [key for c in json.loads(out or "[]") if (key := c.get("key"))]
 
     def create_checkpoint(self, sandbox_id: str, name: str) -> None:
         """Snapshot a running sandbox's filesystem into a named checkpoint.

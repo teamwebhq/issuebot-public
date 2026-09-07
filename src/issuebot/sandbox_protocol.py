@@ -59,6 +59,12 @@ logger = logging.getLogger("issuebot")
 # The worker prints its result on stdout behind this marker, and also writes it
 # to a file so a run cut short before the line is flushed can still be recovered.
 RESULT_MARKER = "##ISSUEBOT-RESULT##"
+
+# The line the worker prints once the workspace is prepared — cloned, and its
+# repo's bootstrap applied — and before the agent has done anything in it. The
+# controller's cue to snapshot the connection's warm boot at the one moment the
+# workspace holds a bootstrap result and no task's work.
+READY_MARKER = "##ISSUEBOT-READY##"
 RESULT_FILE = "/tmp/issuebot-result.json"  # noqa: S108 — ephemeral per-task container
 
 # One stable release version, on a line of its own. What a probe's output is
@@ -472,6 +478,18 @@ class RunResult:
         except ValueError:
             return None
         return cls.from_payload(payload) if isinstance(payload, dict) else None
+
+
+def in_sandbox(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether this process is a sandbox worker.
+
+    True exactly when a controller sent the wire — nothing else sets it, and a
+    hand-run ``run-one`` on a configured machine sets none of it. What it gates
+    is the machine-readable progress markers, which have no reader in a local
+    run and no place in its feed.
+    """
+    env = os.environ if environ is None else environ
+    return bool(env.get(_ENV_CONFIG))
 
 
 def parse_sentinel(line: str) -> RunResult | None:

@@ -180,6 +180,33 @@ def test_provision_reruns_setup_when_config_changes(tmp_path: Path):
     assert len(setup_calls) == 2
 
 
+def test_provision_reruns_setup_when_a_lockfile_changes(tmp_path: Path):
+    """The whole point of re-provisioning a warm workspace: the bootstrap table
+    is untouched, but what its commands install has moved."""
+    gd = _git_dir(tmp_path)
+    _write(tmp_path, '[bootstrap]\nsetup = ["npm ci"]\n')
+    (tmp_path / "package-lock.json").write_text('{"v": 1}')
+    provision.provision(str(tmp_path), reporter=NullReporter(), run=FakeRunner(gd))
+
+    (tmp_path / "package-lock.json").write_text('{"v": 2}')
+    run2 = FakeRunner(gd)
+    provision.provision(str(tmp_path), reporter=NullReporter(), run=run2)
+
+    assert [c for c in run2.calls if c[0][:2] != ["git", "rev-parse"]]
+
+
+def test_provision_skips_setup_when_the_lockfiles_are_untouched(tmp_path: Path):
+    gd = _git_dir(tmp_path)
+    _write(tmp_path, '[bootstrap]\nsetup = ["npm ci"]\n')
+    (tmp_path / "package-lock.json").write_text('{"v": 1}')
+    provision.provision(str(tmp_path), reporter=NullReporter(), run=FakeRunner(gd))
+
+    run2 = FakeRunner(gd)
+    provision.provision(str(tmp_path), reporter=NullReporter(), run=run2)
+
+    assert [c for c in run2.calls if c[0][:2] != ["git", "rev-parse"]] == []
+
+
 def test_provision_setup_failure_raises(tmp_path: Path):
     gd = _git_dir(tmp_path)
     _write(tmp_path, '[bootstrap]\nsetup = ["false"]\n')

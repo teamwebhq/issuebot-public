@@ -32,6 +32,49 @@ KILL_GRACE = 5.0
 _POLL = 0.3
 
 
+# -- running the real tool rather than an execution platform's wrapper -------
+#
+# An execution platform may shadow a tool with a restricted wrapper, so that an
+# *agent* loose in its sandbox cannot do as it likes with it. issuebot is not
+# the agent: its own clone, push and pull request need the real tool, and a
+# wrapper's refusal reaches the user as a run that failed for no visible
+# reason.
+#
+# Which tools those are and where the real ones live is the platform's own
+# knowledge, asked for by :meth:`issuebot.sandbox.SandboxProvider.tool_paths`
+# and delivered here as one variable per tool. This side of it knows only the
+# spelling of the variable. Unset on a host and in any image that wraps
+# nothing, which is why every command still resolves by name by default.
+#
+# The agent inherits these variables and ignores them: it resolves a tool from
+# PATH itself, and so still gets the wrapper it is meant to have.
+TOOL_ENV_PREFIX = "ISSUEBOT_TOOL_"
+
+
+def tool_env(paths: Mapping[str, str]) -> dict[str, str]:
+    """A provider's tool paths, as the variables :func:`real_tool` reads."""
+    return {f"{TOOL_ENV_PREFIX}{name.upper()}": path for name, path in paths.items()}
+
+
+def real_tool(name: str) -> str:
+    """The program to run for ``name``: an override when the environment names
+    one, else ``name`` itself for the usual PATH lookup."""
+    return os.environ.get(f"{TOOL_ENV_PREFIX}{name.upper()}") or name
+
+
+def resolved(argv: list[str]) -> list[str]:
+    """``argv`` with its program resolved through :func:`real_tool`.
+
+    Applied by :class:`RealProcess` to everything it runs, so no caller has to
+    remember which tools a platform wraps.
+    """
+    if not argv:
+        return argv
+
+    program = real_tool(argv[0])
+    return argv if program == argv[0] else [program, *argv[1:]]
+
+
 @dataclass(frozen=True)
 class Completed:
     """A finished command: what was run, how it exited, and what it said."""
@@ -127,7 +170,7 @@ class RealProcess:
         """Run to completion and capture output."""
         try:
             r = subprocess.run(
-                argv,
+                resolved(argv),
                 cwd=cwd,
                 text=True,
                 capture_output=True,
@@ -168,7 +211,7 @@ class RealProcess:
 
         try:
             proc = subprocess.Popen(  # noqa: S603 - argv is built by callers, never shell
-                argv,
+                resolved(argv),
                 cwd=cwd,
                 stdin=feed,
                 stdout=subprocess.PIPE,

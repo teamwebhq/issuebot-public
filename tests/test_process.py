@@ -15,7 +15,14 @@ import time
 
 import pytest
 
-from issuebot.process import NOT_RUN, Completed, RealProcess, RecordingProcess
+from issuebot.process import (
+    NOT_RUN,
+    Completed,
+    RealProcess,
+    RecordingProcess,
+    resolved,
+    tool_env,
+)
 
 # A python that is definitely on this machine — the interpreter running us.
 PY = sys.executable
@@ -200,3 +207,42 @@ def test_the_recording_adapter_stops_streaming_when_cancelled():
 
     proc.spawn(["x"], on_line=stop_after_first, cancel=cancel)
     assert seen == ["one"]
+
+
+# ---------------------------------------------------------------------------
+# Running the real tool rather than a platform's wrapper
+# ---------------------------------------------------------------------------
+
+
+def test_a_tool_the_platform_named_is_run_by_that_path(monkeypatch):
+    monkeypatch.setenv("ISSUEBOT_TOOL_GIT", "/usr/bin/git")
+
+    assert resolved(["git", "status"]) == ["/usr/bin/git", "status"]
+    # Only the tools the platform named; everything else resolves by name.
+    assert resolved(["gh", "pr", "create"]) == ["gh", "pr", "create"]
+
+
+def test_without_an_override_argv_is_left_exactly_as_it_was(monkeypatch):
+    monkeypatch.delenv("ISSUEBOT_TOOL_GIT", raising=False)
+
+    assert resolved(["git", "status"]) == ["git", "status"]
+    assert resolved([]) == []
+
+
+def test_provider_tool_paths_become_the_variables_that_are_read():
+    env = tool_env({"git": "/usr/bin/git", "gh": "/usr/bin/gh"})
+
+    assert env == {"ISSUEBOT_TOOL_GIT": "/usr/bin/git", "ISSUEBOT_TOOL_GH": "/usr/bin/gh"}
+
+
+def test_the_real_adapter_runs_the_named_program(tmp_path, monkeypatch):
+    """The whole point: `RealProcess` runs the override, not the bare name."""
+    tool = tmp_path / "real-git"
+    tool.write_text("#!/bin/sh\necho real\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("ISSUEBOT_TOOL_GIT", str(tool))
+
+    done = RealProcess().run(["git", "status"])
+
+    assert done.ok
+    assert done.out.strip() == "real"

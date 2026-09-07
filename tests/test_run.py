@@ -40,6 +40,7 @@ from issuebot.plugins.workspaces.base import WorkspaceProblem
 from issuebot.process import RecordingProcess
 from issuebot.provision import ProvisionResult
 from issuebot.run import RESPONSE_ENV, execute
+from issuebot.sandbox_protocol import READY_MARKER
 
 ALL_PERMITS = frozenset({"changes", "answer", "needs_input", "handoff"})
 
@@ -102,6 +103,32 @@ def _run(
     kwargs: dict = dict(reporter=RecordingReporter())
     kwargs.update(overrides)
     return execute(job or _job(), w, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Telling a controller the workspace is ready
+# ---------------------------------------------------------------------------
+
+
+def test_a_sandbox_worker_says_when_the_workspace_is_bootstrapped(monkeypatch):
+    """The controller snapshots the connection's warm boot on this line, so it
+    has to arrive once the bootstrap is applied and before the agent works."""
+    monkeypatch.setenv("ISSUEBOT_WIRE_CONFIG", '{"connections": []}')
+    rep = RecordingReporter()
+
+    _run(reporter=rep)
+
+    assert READY_MARKER in rep.raw_lines
+
+
+def test_a_local_run_says_nothing_of_the_sort(monkeypatch):
+    """Nobody is watching the stream, and a machine marker is not feed output."""
+    monkeypatch.delenv("ISSUEBOT_WIRE_CONFIG", raising=False)
+    rep = RecordingReporter()
+
+    _run(reporter=rep)
+
+    assert READY_MARKER not in rep.raw_lines
 
 
 # ---------------------------------------------------------------------------

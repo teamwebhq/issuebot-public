@@ -63,6 +63,7 @@ from issuebot.plugins.sources.base import ForgeAuth
 from issuebot.plugins.workspaces.base import Prepared, Workspace
 from issuebot.process import REAL, Process, with_env
 from issuebot.reporter import ConsoleReporter, Reporter
+from issuebot.sandbox_protocol import READY_MARKER, in_sandbox
 from issuebot.summaries import commit_message
 from issuebot.transient import describe_transient, is_transient
 
@@ -194,6 +195,14 @@ def _prepare(
         if changes_permitted:
             return Response(status="failed", result_text="bootstrap failed")
         prov = provision.ProvisionResult()
+    else:
+        # A sandbox controller is watching this stream for the one moment the
+        # workspace is worth keeping for every later task: prepared and
+        # bootstrapped, and nothing done in it yet. Said only on the success
+        # path — a half-applied bootstrap must not become anyone's warm boot —
+        # and only from a sandbox, a local run having no controller to tell.
+        if in_sandbox():
+            rep.raw(READY_MARKER)
 
     return _Ready(prepared=prepared, prov=prov)
 

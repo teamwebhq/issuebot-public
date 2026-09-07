@@ -379,10 +379,59 @@ def _no_bookkeeping(monkeypatch) -> list[str]:
     return recorded
 
 
-def test_a_cold_run_populates_the_project_checkpoint(monkeypatch):
+def test_a_cold_run_snapshots_the_workspace_the_moment_it_is_bootstrapped(monkeypatch):
+    """The warm boot is worth having for the bootstrap result in it, and worth
+    nothing if it also carries a task's work — so it is taken when the worker
+    says the workspace is ready, not at the end of the run."""
     _no_bookkeeping(monkeypatch)
     provider = FakeProvider(checkpoints=[])
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    assert provider.checkpoint_creates == [("sbx_1", "project-p")]
+
+
+def test_a_worker_that_never_reports_ready_leaves_no_warm_boot(monkeypatch):
+    """A run whose bootstrap failed, or that died before it — nothing in that
+    sandbox is worth every later task starting from."""
+    _no_bookkeeping(monkeypatch)
+    provider = FakeProvider(checkpoints=[], emit_ready=False)
+    _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    assert provider.checkpoint_creates == []
+
+
+def test_read_only_work_still_leaves_a_warm_boot(monkeypatch):
+    """A clone and a bootstrap cost the same whoever asked for them, so the
+    workspace a mention prepared is as reusable as any other."""
+    _no_bookkeeping(monkeypatch)
+    provider = FakeProvider(checkpoints=[])
+    _executor(provider).run(_job(mention()), reporter=RecordingReporter())
+
+    assert provider.checkpoint_creates == [("sbx_1", "project-p")]
+
+
+@pytest.mark.parametrize("status", ["failed", "aborted", "timed out"])
+def test_an_unfinished_run_keeps_its_own_state(monkeypatch, status):
+    """A run that could change things and did not finish holds one task's
+    part-finished branch — the next attempt's best start, kept under that task's
+    own name."""
+    recorded = _no_bookkeeping(monkeypatch)
+    provider = FakeProvider(result={"status": status, "outputs": []}, checkpoints=[])
+
+    _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    assert ("sbx_1", "task-t1") in provider.checkpoint_creates
+    assert recorded == ["t1"]  # so the TTL sweep can reclaim it
+    assert provider.checkpoint_deletes == []
+
+
+def test_an_unfinished_read_only_run_has_nothing_to_resume_into(monkeypatch):
+    """Nothing could have changed, so no task checkpoint — only the warm boot
+    its bootstrap earned."""
+    _no_bookkeeping(monkeypatch)
+    provider = FakeProvider(result={"status": "failed", "outputs": []}, checkpoints=[])
+
+    _executor(provider).run(_job(mention()), reporter=RecordingReporter())
 
     assert provider.checkpoint_creates == [("sbx_1", "project-p")]
 
@@ -391,14 +440,6 @@ def test_a_warm_run_does_not_re_snapshot(monkeypatch):
     _no_bookkeeping(monkeypatch)
     provider = FakeProvider(checkpoints=["project-p"])
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
-
-    assert provider.checkpoint_creates == []
-
-
-def test_read_only_work_leaves_nothing_worth_caching(monkeypatch):
-    _no_bookkeeping(monkeypatch)
-    provider = FakeProvider(checkpoints=[])
-    _executor(provider).run(_job(mention()), reporter=RecordingReporter())
 
     assert provider.checkpoint_creates == []
 
@@ -430,7 +471,7 @@ def test_work_waiting_on_a_human_keeps_its_own_checkpoint(monkeypatch):
 
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
-    assert provider.checkpoint_creates == [("sbx_1", "task-t1")]
+    assert ("sbx_1", "task-t1") in provider.checkpoint_creates
     assert recorded == ["t1"]  # so the TTL sweep can find it later
 
 
@@ -580,6 +621,17 @@ def test_infrastructure_secrets_come_from_the_provider():
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
     assert provider.created["env"]["FAKE_SECRET"] == "s3cret"
+
+
+def test_the_providers_tool_paths_reach_the_sandbox():
+    """A platform whose image shadows a tool with an agent-safety wrapper names
+    the real one, and the sandbox's environment carries it — so issuebot's own
+    git inside the sandbox is the real git, and the agent's is still the
+    wrapper."""
+    provider = FakeProvider()
+    _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    assert provider.created["env"]["ISSUEBOT_TOOL_GIT"] == "/fake/bin/git"
 
 
 def test_the_mention_context_rides_the_wire():
