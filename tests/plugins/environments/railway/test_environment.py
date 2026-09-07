@@ -13,6 +13,7 @@ without learning the plugin's name.
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 from typer.testing import CliRunner
@@ -21,10 +22,12 @@ from conftest import VERSION, FakeApi, completed, config, connection, ctx, sandb
 from issuebot import cli, release
 from issuebot.config import validate_config
 from issuebot.plugins.environments.railway.environment import (
+    REQUIRED_TOOLS,
     TEMPLATE,
     RailwayEnvironment,
     RailwayError,
     RailwayProvider,
+    ensure_tool_step,
 )
 from issuebot.plugins.environments.railway.settings import TOKEN_VARS, ambient_token, token_env
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
@@ -284,18 +287,51 @@ def test_creating_and_deleting_a_checkpoint():
 # ---------------------------------------------------------------------------
 
 
-def test_building_the_template_installs_the_declared_packages():
-    """Packages are one shell build step, not a flag: the CLI takes `--command`
-    steps only, so the base image's package manager has to be spelled out."""
+def test_the_template_is_named_and_built_from_shell_steps():
+    """The name is a flag and every build instruction is a `--command` shell
+    step: the CLI takes no positional name and no package flag."""
     proc = RecordingProcess()
     _provider(proc).build_template()
 
     argv = proc.calls[0]
     assert argv[:4] == ["railway", "sandbox", "template", "build"]
     assert argv[argv.index("--name") + 1] == TEMPLATE
+    assert "--command" in argv
 
+
+def test_every_required_tool_is_installed_only_when_the_image_lacks_it():
+    """Railway's base image changes without notice, so each tool a run needs is
+    checked at build time — a no-op on an image that has it, an install on one
+    that does not."""
+    proc = RecordingProcess()
+    _provider(proc).build_template()
+
+    argv = proc.calls[0]
     steps = [argv[i + 1] for i, word in enumerate(argv) if word == "--command"]
-    assert any("apt-get install" in step and "gh" in step for step in steps)
+
+    for tool, install in REQUIRED_TOOLS.items():
+        step = next(s for s in steps if s.startswith(f"command -v {tool} "))
+        assert install in step
+
+
+def test_gh_is_installed_after_curl_because_its_install_needs_curl():
+    """Insertion order is the order the steps run in."""
+    tools = list(REQUIRED_TOOLS)
+    assert tools.index("curl") < tools.index("gh")
+
+
+def test_a_tool_already_on_path_is_not_reinstalled():
+    """The generated shell, run for real: the install side must not fire when
+    the tool is present, or every build would reinstall everything."""
+    step = ensure_tool_step("sh", "exit 9")  # `sh` is present wherever this runs
+    assert subprocess.run(["sh", "-c", step], check=False).returncode == 0
+
+
+def test_an_install_that_fails_fails_the_step():
+    """Nothing asserts the tool afterwards, so this is what makes a broken
+    install fail the build rather than pass silently."""
+    step = ensure_tool_step("definitely-not-a-real-tool", "exit 7")
+    assert subprocess.run(["sh", "-c", step], check=False).returncode == 7
 
 
 def test_building_the_template_waits_for_the_build_to_finish():

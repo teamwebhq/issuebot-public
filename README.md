@@ -804,10 +804,12 @@ connection has no token and the environment has no token.
 
 ### Build the tooling template
 
-A sandbox starts from a template with the tools that the agent needs. The
-Railway base image supplies git, curl, node and npm. The template adds `gh` and
-the exact release of the controller. Build the template one time for each
-Railway project, while you run the controller from a released wheel:
+A sandbox starts from a template with the tools that the agent needs: `git`,
+`curl`, `gh`, and the exact release of the controller. Each build step first
+looks for the tool, and installs it only if the Railway base image does not
+have it. Today that image has all three tools, so the build installs only the
+controller. Build the template one time for each Railway project, while you run
+the controller from a released wheel:
 
 ```sh
 issuebot railway build-template                    # in the default project

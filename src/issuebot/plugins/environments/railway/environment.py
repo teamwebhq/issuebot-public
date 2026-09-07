@@ -23,7 +23,6 @@ One class holds the credential and speaks the CLI.
 from __future__ import annotations
 
 import json
-import shlex
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, ClassVar
@@ -39,23 +38,63 @@ if TYPE_CHECKING:
     from issuebot.runner import Wiring
 
 # The shared sandbox template, built by `issuebot railway build-template`. A
-# prebuilt template lets `create` start warm — git, gh and node already present —
-# instead of installing them on every fresh sandbox.
+# prebuilt template lets `create` start warm — this exact issuebot release
+# already installed — instead of installing it on every fresh sandbox.
 TEMPLATE = "issuebot-tools"
 
-# What the template adds to Railway's base sandbox image. That image already
-# carries git, curl, node and npm, and issuebot's installer bootstraps uv for
-# itself, so `gh` — which the github sink shells out to for pull requests — is
-# the only tool genuinely missing.
-TEMPLATE_PACKAGES = ["gh"]
-
-# ponytail: the base sandbox image is Debian, so apt-get is the package manager.
-# A build step must exit 0, so a failure here fails `build-template` loudly
-# rather than producing a template with a tool missing.
-PACKAGE_INSTALL = (
-    "apt-get update && DEBIAN_FRONTEND=noninteractive "
-    "apt-get install -y --no-install-recommends {packages}"
+# Every tool a run needs in the sandbox, and the shell that installs one when
+# the base image does not carry it.
+#
+# Railway's base image carries all of these today (Debian 13, as root), so the
+# usual build does nothing at all — but it changes without notice, and a tool
+# that quietly disappears surfaces late and badly: a clone that cannot
+# authenticate, or a `gh pr create` that fails after the agent has done all the
+# work. Checking at build time costs nothing when the tool is there and fixes
+# it when it is not.
+#
+# Insertion order is install order, and `gh`'s own install needs `curl`, so
+# `curl` is checked before it.
+#
+# `gh` is in no Debian release's own repositories — only GitHub's — so its entry
+# registers that repository before installing. Pins no version, and does not
+# depend on which Debian the base image is.
+#
+# The sequence is GitHub's own, from cli/cli's docs/install_linux.md, with two
+# departures: no `sudo` (a sandbox runs as root) and `curl` in place of the
+# doc's `wget`, which the base image does not carry. Re-read that file before
+# changing any of it.
+_APT_INSTALL = (
+    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends"  # noqa: E501
 )
+
+REQUIRED_TOOLS: dict[str, str] = {
+    "git": f"{_APT_INSTALL} git",
+    "curl": f"{_APT_INSTALL} curl",
+    "gh": (
+        "mkdir -p -m 755 /etc/apt/keyrings"
+        " && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+        " -o /etc/apt/keyrings/githubcli-archive-keyring.gpg"
+        " && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg"
+        " && mkdir -p -m 755 /etc/apt/sources.list.d"
+        ' && echo "deb [arch=$(dpkg --print-architecture)'
+        " signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg]"
+        ' https://cli.github.com/packages stable main"'
+        " > /etc/apt/sources.list.d/github-cli.list"
+        f" && {_APT_INSTALL} gh"
+    ),
+}
+
+
+def ensure_tool_step(tool: str, install: str) -> str:
+    """One build step that installs ``tool`` only if the image lacks it.
+
+    A tool already on PATH — the normal case for every one of them — makes this
+    an instant no-op. Nothing asserts the result: an install that fails exits
+    non-zero by itself, and a build step must exit 0, so a broken install
+    already fails the build without a check of its own.
+    """
+    return f"command -v {tool} >/dev/null 2>&1 || {{ {install}; }}"
+
 
 # How long a sandbox may sit idle before Railway reclaims it.
 _IDLE_TIMEOUT_MINUTES = 120
@@ -238,12 +277,18 @@ class RailwayProvider:
 
     # -- project-wide administration ----------------------------------------
 
-    def build_template(self, name: str = TEMPLATE, packages: list[str] | None = None) -> None:
+    def build_template(self, name: str = TEMPLATE) -> None:
         """Build the named sandbox template with this released issuebot pinned.
 
         A template is an ordered list of shell build steps, one per
-        ``--command``, each of which must exit 0: the first installs the tools
-        the base image lacks, the second installs this exact issuebot release.
+        ``--command``, each of which must exit 0: one step per required tool
+        (see :data:`REQUIRED_TOOLS`), which checks and only then installs, then
+        a last step installing this exact issuebot release.
+
+        One step per tool rather than one that sweeps them all, because the CLI
+        reports only that *a* step failed — so the step is the unit of blame,
+        and a build that breaks names the tool it broke on. Each is a no-op
+        against an image that already has the tool.
 
         ``--wait`` polls until the build reports READY or FAILED, so a template
         this returns from is one ``create --template`` can boot — without it the
@@ -262,9 +307,8 @@ class RailwayProvider:
         # this machine's), which is why it is the runner itself that builds.
         argv = ["sandbox", "template", "build", "--name", name, "--wait"]
 
-        wanted = packages if packages is not None else TEMPLATE_PACKAGES
-        if wanted:
-            argv += ["--command", PACKAGE_INSTALL.format(packages=shlex.join(wanted))]
+        for tool, install in REQUIRED_TOOLS.items():
+            argv += ["--command", ensure_tool_step(tool, install)]
 
         # A build step is a shell instruction, so the installer goes in as the
         # shell program `release` already spells, not as an argv.
