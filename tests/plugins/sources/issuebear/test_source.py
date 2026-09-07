@@ -79,28 +79,44 @@ def test_poll_carries_the_notification_a_mention_is_claimed_by():
     assert [i.notification_id for i in _source(api).poll(timeout=1)] == ["n1"]
 
 
-def test_poll_works_the_oldest_item_first_whichever_list_it_came_from():
-    """A mention that has waited since 8:20 goes before a task assigned at 8:25,
-    even though the board answers tasks and mentions as separate lists."""
+def test_poll_works_the_board_sequence_whichever_list_an_item_came_from():
+    """The board numbers both lists over one order, and that order is what the
+    listener is handed — the mention at sequence 1 before the tasks after it,
+    even though they arrive as two separate lists."""
     api = FakeApi(
         work_items=[
-            {"task_id": "t1", "board_id": "b", "queued_at": "2026-09-01T08:25:00Z"},
+            # An assigned task, and a pool offer that entered its column weeks
+            # ago. Their timestamps say the offer is the oldest work here; the
+            # board's sequence says it is the last.
+            {
+                "task_id": "t1",
+                "board_id": "b",
+                "sequence": 2,
+                "queued_at": "2026-09-01T09:00:00Z",
+            },
             {
                 "task_id": "t2",
                 "board_id": "b",
+                "sequence": 3,
+                "queued_at": "2026-08-01T00:00:00Z",
+            },
+            {
+                "task_id": "m1",
+                "board_id": "b",
                 "kind": "mention",
                 "notification_id": "n1",
-                "queued_at": "2026-09-01T08:20:00Z",
+                "sequence": 1,
+                "queued_at": "2026-09-01T08:00:00Z",
             },
         ]
     )
 
-    assert [i.task_id for i in _source(api).poll(timeout=1)] == ["t2", "t1"]
+    assert [i.task_id for i in _source(api).poll(timeout=1)] == ["m1", "t1", "t2"]
 
 
-def test_poll_keeps_the_boards_order_when_nothing_is_timestamped():
-    """An older board sends no ``queued_at``, and its work is still worked in
-    the order it was sent: tasks, then mentions."""
+def test_poll_keeps_the_boards_order_when_nothing_is_sequenced():
+    """A board that sends no ``sequence`` still has its work worked in the
+    order it sent it: tasks, then mentions."""
     api = FakeApi(
         work_items=[
             {"task_id": "t1", "board_id": "b"},
