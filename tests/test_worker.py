@@ -110,6 +110,42 @@ def _run(cfg, wire, **overrides):
 # ---------------------------------------------------------------------------
 
 
+def test_the_wire_config_does_not_collide_with_the_config_path_override(cfg):
+    """`ISSUEBOT_CONFIG` names the config *file*. A wire key of the same name
+    would point `load_config` at a JSON document where a path belongs."""
+    from issuebot.config import CONFIG_ENV
+
+    encoded = WorkerEnv(config=cfg.model_dump(exclude_none=True)).encode()
+
+    assert CONFIG_ENV not in encoded
+    assert WorkerEnv.decode(encoded).config == cfg.model_dump(exclude_none=True)
+
+
+def test_the_wires_config_is_what_the_worker_wires_itself_from(ran):
+    """A sandbox has no config file, so the controller sends one. The wire is
+    the authority: whatever is on disk here does not decide the run."""
+    sent = config(connections=[sandbox_connection(name="parade")])
+    wire = WorkerEnv(
+        instructions={"work_task": "Task {reference}."},
+        config=sent.model_dump(exclude_none=True),
+    )
+
+    # A config with no such connection at all: only the wire's can answer.
+    _run(config(connections=[]), wire)
+
+    assert ran["project"].name == "parade"
+
+
+def test_a_config_file_still_runs_a_hand_run_worker(cfg, wire, ran):
+    """`run-one` by hand on a configured machine sends no config, and then the
+    file on disk is what it works from."""
+    assert not wire.config
+
+    _run(cfg, wire)
+
+    assert ran["project"].name == "parade"
+
+
 def test_an_unknown_kind_of_work_is_refused(cfg, wire):
     with pytest.raises(worker.UnknownWork, match="banana"):
         _run(cfg, wire, kind="banana")

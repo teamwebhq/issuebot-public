@@ -103,6 +103,17 @@ def session_store(harness: Harness) -> SessionStore | None:
     return SessionStore(default_state_path()) if harness.resumes_sessions else None
 
 
+def config_for(wire: WorkerEnv, fallback: Config) -> Config:
+    """The config this worker runs under: the controller's, else the one on disk.
+
+    A remote run is always the wire's — the controller narrowed it deliberately
+    (see :func:`~issuebot.config.sandbox_config`) and a sandbox has no file of
+    its own anyway. ``fallback`` is for a hand-run ``run-one`` on a machine that
+    does have one, which sends no config at all.
+    """
+    return Config.model_validate(dict(wire.config)) if wire.config else fallback
+
+
 def run_one(
     cfg: Config,
     *,
@@ -123,11 +134,12 @@ def run_one(
     if kind not in _KNOWN_KINDS:
         raise UnknownWork(f"unknown work kind '{kind}' (known: {', '.join(_KNOWN_KINDS)})")
 
+    wire = env if env is not None else WorkerEnv.decode()
+    cfg = config_for(wire, cfg)
+
     connection = cfg.connection(connection_name)
     if connection is None:
         raise UnknownWork(f"unknown connection: {connection_name}")
-
-    wire = env if env is not None else WorkerEnv.decode()
 
     # The last check before the work, and the only one made by the process that
     # will actually do it: the controller already aligned this sandbox, but it

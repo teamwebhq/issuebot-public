@@ -30,7 +30,7 @@ from conftest import (
     work,
 )
 from issuebot import release, sandbox_protocol
-from issuebot.config import source_plugin
+from issuebot.config import Config, source_plugin
 from issuebot.contracts import Changed, Job, NeedsInput, Response, SkillRef, WorkItem
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.runner import Wiring
@@ -488,20 +488,43 @@ def test_checkpoint_failures_never_fail_the_run(monkeypatch, failing):
 # --- what crosses the wire -------------------------------------------------
 
 
-def test_the_sources_own_settings_ride_the_wire():
-    """The worker is told where the board is; it does not carry a config file.
+def test_the_config_rides_the_wire():
+    """The worker is wired from the config it is sent; it carries no file.
 
-    Whose settings, and the settings themselves — the controller names the
-    source plugin and hands over that plugin's table verbatim, rather than
-    three endpoint fields the wire would have to redefine for a second source.
-    Asserted against the registry-keyed table the fixtures build, so nothing
-    here spells a source's name."""
+    A whole config rather than three endpoint fields the wire would have to
+    redefine for a second source. Asserted against the registry-keyed table the
+    fixtures build, so nothing here spells a source's name."""
     provider = FakeProvider()
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
-    sent = _sent(provider)
-    assert sent.source == source_plugin().name
-    assert sent.source_settings == source_table()[source_plugin().name]
+    sent = Config.model_validate(dict(_sent(provider).config))
+    assert sent.settings_for(source_plugin()) == source_table()[source_plugin().name]
+
+
+def test_only_the_connection_that_ran_rides_the_wire():
+    """Every other connection names a different board with a different
+    credential, which this run has no business holding."""
+    provider = FakeProvider()
+    _executor(provider, name="p").run(_job(work()), reporter=RecordingReporter())
+
+    sent = Config.model_validate(dict(_sent(provider).config))
+    assert [c.name for c in sent.connections] == ["p"]
+
+
+def test_the_environments_own_settings_never_reach_the_sandbox():
+    """A provider credential creates sandboxes, so it must not travel into one.
+
+    The environment's table has no reader in there anyway — the worker overrides
+    the choice with `in_process_environment` — so `executor` goes too, which is
+    what keeps the result a config that would still validate."""
+    provider = FakeProvider()
+    executor = _executor(provider, executor="fake_env", fake_env={"token": "t0ken"})
+    executor.run(_job(work()), reporter=RecordingReporter())
+
+    raw = dict(_sent(provider).config)
+    assert "fake_env" not in raw
+    assert "fake_env" not in raw["connections"][0]
+    assert raw["connections"][0].get("executor") is None
 
 
 def test_infrastructure_secrets_come_from_the_provider():

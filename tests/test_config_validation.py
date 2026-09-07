@@ -22,7 +22,7 @@ from issuebot.config import (
     source_plugin,
     validate_config,
 )
-from issuebot.plugins.base import Plugin
+from issuebot.plugins.base import Plugin, SinkPlugin, WorkspacePlugin
 
 
 def _cfg(**conn_overrides: Any) -> Config:
@@ -295,3 +295,77 @@ def test_a_keyless_connection_is_validated_against_the_workspace_the_run_would_u
 
     assert any("nowhere to work" in p for p in problems())
     assert not any("nowhere to work" in p for p in problems(folder="/tmp/p"))
+
+
+# --- a sink nothing could reach (ADR-0011's config-load half) -----------------
+
+
+def _changes_only_sink() -> str | None:
+    """An installed sink that accepts nothing a changes-free workspace makes.
+
+    Asked of the registry rather than named, so this keeps testing the rule
+    after any particular sink is deleted — and skips instead of failing on an
+    install that has none."""
+    for name, plugin in sorted(plugins.all_of("sinks").items()):
+        if isinstance(plugin, SinkPlugin) and not (plugin.sink.accepts - {"changes"}):
+            return name
+    return None
+
+
+def _changes_free_workspace_keys() -> dict[str, Any] | None:
+    """Connection keys landing on a workspace that can never produce `changes`."""
+    for _name, plugin in sorted(plugins.all_of("workspaces").items()):
+        if isinstance(plugin, WorkspacePlugin) and "changes" not in plugin.workspace.produces:
+            return {"folder": "/tmp/p"}
+    return None
+
+
+def test_a_sink_nothing_could_ever_reach_is_rejected():
+    """A workspace that never produces `changes` wired to a sink that accepts
+    only `changes` publishes nothing, ever. Rejected at load rather than left
+    as a sink that silently never fires (ADR-0011)."""
+    sink = _changes_only_sink()
+    keys = _changes_free_workspace_keys()
+    if sink is None or keys is None:
+        pytest.skip("no changes-only sink and changes-free workspace installed")
+
+    problems = validate_config(_cfg(sinks=[sink], **keys))
+
+    assert any(sink in p and "could never deliver" in p for p in problems)
+
+
+def test_a_sink_the_workspace_can_reach_is_accepted():
+    """The other half: the same sink on a connection that does produce changes
+    is fine, so the rule rejects a combination rather than a sink."""
+    sink = _changes_only_sink()
+    if sink is None:
+        pytest.skip("no changes-only sink installed")
+
+    problems = validate_config(
+        _cfg(folder=None, repo="https://example.com/r.git", git_init="branch", sinks=[sink])
+    )
+
+    assert not [p for p in problems if "could never deliver" in p]
+
+
+def test_the_settings_narrowed_answer_is_what_the_rule_reads():
+    """`produces_for`, not the class's `produces`: a workspace whose *kind* can
+    produce changes still cannot for a connection configured not to, and that
+    connection's changes-only sink is just as unreachable."""
+    sink = _changes_only_sink()
+    narrowing = next(
+        (
+            name
+            for name, plugin in sorted(plugins.all_of("workspaces").items())
+            if isinstance(plugin, WorkspacePlugin) and "changes" in plugin.workspace.produces
+        ),
+        None,
+    )
+    if sink is None or narrowing is None:
+        pytest.skip("no changes-only sink and narrowing workspace installed")
+
+    # A repo with no branch strategy: the workspace kind produces changes, this
+    # connection does not.
+    problems = validate_config(_cfg(folder=None, repo="https://example.com/r.git", sinks=[sink]))
+
+    assert any(sink in p and "could never deliver" in p for p in problems)

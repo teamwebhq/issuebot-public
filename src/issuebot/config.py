@@ -33,10 +33,12 @@ import typer
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from issuebot import plugins
+from issuebot.contracts import OutputKind
 from issuebot.plugins.base import (
     EnvironmentPlugin,
     HarnessPlugin,
     Plugin,
+    SinkPlugin,
     SourcePlugin,
     WorkspacePlugin,
 )
@@ -492,6 +494,53 @@ def default_config_path() -> Path:
     return config_dir() / "config.toml"
 
 
+def sandbox_config(
+    connection: Connection,
+    *,
+    harness: str | None,
+    plugin_settings: Mapping[str, Any],
+    task_timeout_minutes: int | None = None,
+) -> Config:
+    """The config one sandbox worker runs under: this run's connection, alone.
+
+    A sandbox has no config file — it is a fresh machine — so the controller
+    sends one over the wire (ADR-0004). What it sends is deliberately *not* its
+    own config:
+
+    * **One connection.** Every other connection in the file names a different
+      board, with a different credential, that this run has no business
+      holding.
+    * **No environment.** ``executor`` and the environment plugin's tables —
+      both the connection's and the global one — are dropped. The sandbox is
+      already inside that environment and the worker overrides the choice with
+      :func:`~issuebot.runner.in_process_environment`, so nothing in there
+      reads them. They are also where a provider credential lives: a Railway
+      token that creates sandboxes must not travel *into* one.
+
+    Dropping ``executor`` rather than only its table is what keeps the result a
+    config that would pass :func:`validate_config` — an environment named with
+    its settings removed is exactly what that function rejects.
+    """
+    table = connection.model_dump(exclude_none=True)
+    tables = {name: dict(settings) for name, settings in plugin_settings.items()}
+
+    # One name covers both: a plugin's connection table and its global table are
+    # keyed by the same plugin name.
+    environment = table.pop("executor", None)
+    if environment:
+        table.pop(environment, None)
+        tables.pop(environment, None)
+
+    return Config.model_validate(
+        {
+            **tables,
+            "harness": harness,
+            "task_timeout_minutes": task_timeout_minutes,
+            "connections": [table],
+        }
+    )
+
+
 class ConfigError(ValueError):
     """A config says something no installed plugin can honour.
 
@@ -795,6 +844,76 @@ def _harness_problems(cfg: Config) -> list[str]:
     return []
 
 
+def _produced_kinds(plugin: WorkspacePlugin, conn: Connection) -> frozenset[OutputKind]:
+    """Which output kinds a run on this connection's workspace could produce.
+
+    Asks ``produces_for`` rather than the class's ``produces``, because that is
+    the honest question: git derives no ``changes`` for a connection that cuts
+    no branch, so the class's answer would be too generous for exactly the
+    connection this check exists to catch.
+
+    Falls back to the class for a workspace whose settings do not validate (the
+    settings model reports that itself, and a second sentence about it here
+    would be noise) or whose constructor wants arguments validation has no way
+    to supply — validation runs at load, long before a run builds anything.
+    """
+    if plugin.settings is None:
+        return plugin.workspace.produces
+
+    try:
+        settings = plugin.settings.model_validate(conn.settings_for(plugin))
+        return plugin.workspace().produces_for(settings)
+    except Exception:  # noqa: BLE001 - a workspace that cannot answer answers as its class
+        return plugin.workspace.produces
+
+
+def _unreachable_sink_problems(conn: Connection, harness: str | None) -> list[str]:
+    """Sinks this connection declares that nothing it can produce would reach.
+
+    The config-load half of ADR-0011's intersection. Per-run narrowing keeps the
+    agent's instructions honest; this rejects the combination that can never
+    deliver *before* a run, instead of leaving a sink that silently never fires.
+
+    A ``folder`` workspace produces no ``changes``, and so does ``git`` on a
+    connection that cuts no branch — wire either to a sink that accepts only
+    ``changes`` and every run finishes with the sink skipped and nothing
+    published.
+
+    Reads ``accepts`` off each registered sink *class*, the way git's own
+    validation reads ``needs_pushed_branch``: this names no sink and no
+    workspace, so the rule holds for every pairing and survives any of them
+    being deleted.
+    """
+    in_play = plugins_in_play(conn, harness)
+    workspace = next((p for p in in_play.values() if isinstance(p, WorkspacePlugin)), None)
+
+    # No workspace in play means `unconfigured_workspace` could not choose one.
+    # That refusal is the run's to make, in its own words (see `plugins_in_play`).
+    if workspace is None:
+        return []
+
+    produced = _produced_kinds(workspace, conn)
+    label = conn.name or "<unnamed>"
+
+    problems: list[str] = []
+    for ref in conn.sinks:
+        plugin = in_play.get(ref.name)
+        if not isinstance(plugin, SinkPlugin) or plugin.sink.accepts & produced:
+            continue
+        problems.append(
+            f"connection '{label}': sink '{ref.name}' delivers only "
+            f"{_kinds(plugin.sink.accepts)}, which this connection's "
+            f"'{workspace.name}' workspace never produces "
+            f"(it produces {_kinds(produced) or 'nothing'}) — the sink could never deliver"
+        )
+    return problems
+
+
+def _kinds(kinds: frozenset[OutputKind]) -> str:
+    """Output kinds as a stable, readable list, for a problem sentence."""
+    return ", ".join(sorted(kinds))
+
+
 def connection_problems(conn: Connection, harness: str | None) -> list[str]:
     """Everything wrong with one connection: keys nothing claims, keys for a
     plugin this connection does not use, plugin names that don't exist, and
@@ -805,6 +924,7 @@ def connection_problems(conn: Connection, harness: str | None) -> list[str]:
         _key_problems(conn, label)
         + _named_plugin_problems(conn, label)
         + _plugin_use_problems(conn, label, harness)
+        + _unreachable_sink_problems(conn, harness)
     )
 
 

@@ -17,11 +17,12 @@ never *told* it may report ``changes``, and is held to the same narrowed set
 when its response comes back. ``runner.workspace_for`` is what resolves a
 connection onto a real ``Workspace`` instance for that.
 
-ponytail: the intersection could also run at *config* load, so an impossible
-combination is rejected before a run rather than silently narrowed during one.
-Per-run narrowing is the half that makes the agent's instructions honest; the
-config-load rejection needs a `validate` hook that can see both plugins at
-once, which no axis has yet (ADR-0011).
+The intersection also runs at *config* load, in
+``config._unreachable_sink_problems``: a connection whose workspace can never
+produce what its sinks accept is rejected when it is written, rather than
+leaving a sink that silently never fires. Per-run narrowing is the half that
+makes the agent's instructions honest; that check is the half that rejects a
+combination which could never deliver (ADR-0011).
 """
 
 from __future__ import annotations

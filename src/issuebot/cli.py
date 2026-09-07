@@ -26,6 +26,7 @@ from issuebot.config import (
     default_config_path,
     harness_for,
     load_config,
+    load_config_or_fail,
     require_config,
     save_config,
     source_plugin,
@@ -548,10 +549,15 @@ def run_one(
     Prints a ``##ISSUEBOT-RESULT##`` JSON line to stdout and writes the same
     payload to a file, then exits 0 when the task finished cleanly and 1
     otherwise. The work itself is :func:`issuebot.worker.run_one`.
+
+    A missing config file is not an error here, which is why this does not call
+    ``require_config``: a sandbox has none, and the controller sends its own
+    over the wire (ADR-0004). A file that exists and is *broken* still fails,
+    and a hand-run ``run-one`` on a configured machine still uses it.
     """
     try:
         outcome = worker.run_one(
-            require_config(),
+            load_config_or_fail() or Config(),
             task_id=task,
             run_id=run_id,
             connection_name=connection,

@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 
 import issuebot
 from issuebot import release
-from issuebot.config import Connection, source_plugin
+from issuebot.config import Connection, sandbox_config
 from issuebot.contracts import Job, NeedsInput, Response, WorkItem
 from issuebot.events import AgentEvent
 from issuebot.plugins.environments.base import ExecutionEnvironment
@@ -172,6 +172,9 @@ class SandboxEnvironment(ExecutionEnvironment):
         self._api = wiring.api
         self._project = wiring.connection
         self._ctx = wiring.ctx
+        # Only the name: which harness runs is the board's or the install's
+        # choice, and the worker resolves it again from the config it is sent.
+        self._harness = wiring.harness.name
         self._provider = provider
 
     # -- boot ---------------------------------------------------------------
@@ -214,10 +217,16 @@ class SandboxEnvironment(ExecutionEnvironment):
                 work,
                 boot=mode,
                 agent_id=self._ctx.agent_id,
-                # The wire carries the source's own settings table, so the
-                # controller has to say *whose* — resolved the same way the
-                # listener resolved it when it built the source for this run.
-                source=source_plugin(self._project.source).name,
+                # A sandbox has no config file, so its wiring rides the wire.
+                # What is in it — one connection, no environment, no provider
+                # credential — is `sandbox_config`'s decision, not this
+                # module's: the controller only says which connection ran.
+                config=sandbox_config(
+                    self._project,
+                    harness=self._harness,
+                    plugin_settings=self._ctx.plugin_settings,
+                    task_timeout_minutes=self._ctx.timeout_minutes,
+                ).model_dump(exclude_none=True),
             ).encode()
         )
 

@@ -93,12 +93,18 @@ _ENV_VERSION = "ISSUEBOT_VERSION"
 _ENV_AGENT_ID = "ISSUEBOT_AGENT_ID"
 _ENV_ACTOR_NAME = "ISSUEBOT_ACTOR_NAME"
 _ENV_COMMENT_EXCERPT = "ISSUEBOT_COMMENT_EXCERPT"
-_ENV_SOURCE = "ISSUEBOT_SOURCE"
-_ENV_SOURCE_SETTINGS = "ISSUEBOT_SOURCE_SETTINGS"
+# The whole config this run works under, narrowed to one connection by
+# `config.sandbox_config`. The sandbox has no config file, so this is where its
+# wiring comes from — not three named endpoints, which were one source plugin's
+# field names spelled into the provider-neutral wire.
+# Not `ISSUEBOT_CONFIG`: that name is already the config *path* override
+# (`config.CONFIG_ENV`), and a sandbox that had both would point `load_config`
+# at a JSON document where a file path belongs.
+_ENV_CONFIG = "ISSUEBOT_WIRE_CONFIG"
 
 # The board's skills and instruction documents, as one JSON object — like
-# `_ENV_SOURCE_SETTINGS`, structured data rather than a plain string, so it
-# gets a channel of its own instead of being packed into one.
+# `_ENV_CONFIG`, structured data rather than a plain string, so it gets a
+# channel of its own instead of being packed into one.
 _ENV_WORK_CONTEXT = "ISSUEBOT_WORK_CONTEXT"
 
 # The board's run preferences. Each is a plain string, so — like actor/excerpt
@@ -117,20 +123,20 @@ class WorkerEnv:
     credentials are carried rather than assumed, so a sandbox image needs no
     config file of its own (ADR-0004).
 
-    Which source, and its whole settings table — not three named endpoints.
-    ``ISSUEBOT_API_URL``/``ISSUEBOT_MCP_URL``/``ISSUEBOT_PAT`` were one source
-    plugin's field names spelled into the provider-neutral wire, so a second
-    source could only ride it by having those three fields. The table travels
-    whole and opaque, exactly as `RunnerContext.plugin_settings` carries it in
-    process: what is in it is the source plugin's declaration, and this module
-    reads none of it.
+    A whole config, narrowed to this run's connection — not three named
+    endpoints. ``ISSUEBOT_API_URL``/``ISSUEBOT_MCP_URL``/``ISSUEBOT_PAT`` were
+    one source plugin's field names spelled into the provider-neutral wire, so
+    a second source could only ride it by having those three fields. The config
+    travels whole and opaque, exactly as `RunnerContext.plugin_settings`
+    carries plugin tables in process: what is in it is each plugin's own
+    declaration, and this module reads none of it.
     """
 
-    # Which source plugin the table below belongs to, by registry name.
-    source: str = ""
-
-    # That plugin's own global settings table, verbatim.
-    source_settings: Mapping[str, Any] = field(default_factory=dict)
+    # The config the worker runs under: every plugin's global table plus this
+    # run's one connection, built by `config.sandbox_config` — which is what
+    # decides how narrow it is, and why. Empty means nobody sent one, which is
+    # a hand-run `run-one` falling back to the config file on disk.
+    config: Mapping[str, Any] = field(default_factory=dict)
 
     boot: BootMode = BootMode.COLD
 
@@ -171,16 +177,16 @@ class WorkerEnv:
         *,
         boot: BootMode,
         agent_id: str | None = None,
-        source: str = "",
+        config: Mapping[str, Any] | None = None,
     ) -> WorkerEnv:
         """What this run needs, drawn from the runner's own settings and item.
 
-        ``source`` is the source plugin's registry name; its table is looked up
-        in ``ctx.plugin_settings`` and carried whole, so nothing here has to know
-        what a board's credentials are called."""
+        ``config`` is what the worker will wire itself from — see
+        :func:`~issuebot.config.sandbox_config`, which builds it and owns every
+        decision about what a sandbox may and may not see. Nothing here reads
+        inside it."""
         return cls(
-            source=source,
-            source_settings=ctx.plugin_settings.get(source) or {},
+            config=dict(config or {}),
             boot=boot,
             version=issuebot.__version__,
             agent_id=agent_id,
@@ -199,8 +205,7 @@ class WorkerEnv:
         Optional values are omitted rather than sent empty, so the worker's own
         fallbacks stay in charge of defaults."""
         env = {
-            _ENV_SOURCE: self.source,
-            _ENV_SOURCE_SETTINGS: json.dumps(dict(self.source_settings)),
+            _ENV_CONFIG: json.dumps(dict(self.config)),
             _ENV_BOOT: self.boot.value,
         }
         for key, value in (
@@ -228,8 +233,9 @@ class WorkerEnv:
         """Read back what the controller sent. The exact inverse of :meth:`encode`.
 
         An unrecognised or missing boot mode reads as cold, which is the mode
-        that assumes least about the machine; an unreadable settings table reads
-        as empty, for the same reason — a hand-run ``run-one`` sends neither."""
+        that assumes least about the machine; an unreadable config reads as
+        empty, for the same reason — a hand-run ``run-one`` sends neither, and
+        an empty config sends the worker to the file on disk."""
         env = os.environ if environ is None else environ
         try:
             boot = BootMode(env.get(_ENV_BOOT, BootMode.COLD.value))
@@ -237,15 +243,14 @@ class WorkerEnv:
             boot = BootMode.COLD
 
         try:
-            settings = json.loads(env.get(_ENV_SOURCE_SETTINGS) or "{}")
+            config = json.loads(env.get(_ENV_CONFIG) or "{}")
         except json.JSONDecodeError:
-            settings = {}
+            config = {}
 
         skills, instructions = _decode_work_context(env.get(_ENV_WORK_CONTEXT))
 
         return cls(
-            source=env.get(_ENV_SOURCE, ""),
-            source_settings=settings if isinstance(settings, dict) else {},
+            config=config if isinstance(config, dict) else {},
             boot=boot,
             version=env.get(_ENV_VERSION, ""),
             agent_id=env.get(_ENV_AGENT_ID),
