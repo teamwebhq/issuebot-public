@@ -84,13 +84,17 @@ def test_the_app_token_and_the_clankers_authorship_travel_together():
     assert env["GIT_COMMITTER_NAME"] == "PushBot"
 
 
-def _machine_with_its_own_helper(tmp_path) -> dict[str, str]:
+def _machine_with_its_own_helper(tmp_path, *, gh_refuses: bool = False) -> dict[str, str]:
     """A machine that already answers for github.com, and a stand-in ``gh``.
 
     Stands for the developer's laptop (osxkeychain in Xcode's system config) or
     a CI runner (``store``): a helper git finds before anything issuebot sets,
     holding a personal credential GitHub no longer accepts. The stand-in ``gh``
     prints what the real one prints — the token it was given.
+
+    ``gh_refuses`` makes it behave like a sandbox image's allowlist wrapper
+    instead (Railway ships ``safe-gh``): present, on PATH, and refusing
+    ``gh auth git-credential`` outright.
     """
     stale = tmp_path / "stale-helper"
     stale.write_text(
@@ -104,7 +108,10 @@ def _machine_with_its_own_helper(tmp_path) -> dict[str, str]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     gh = fake_bin / "gh"
-    gh.write_text('#!/bin/sh\nprintf "username=x-access-token\\npassword=$GH_TOKEN\\n"\n')
+    if gh_refuses:
+        gh.write_text("#!/bin/sh\necho \"safe-gh: refusing to run '$*'\" >&2\nexit 1\n")
+    else:
+        gh.write_text('#!/bin/sh\nprintf "username=x-access-token\\npassword=$GH_TOKEN\\n"\n')
     gh.chmod(0o755)
 
     return {
@@ -132,6 +139,26 @@ def test_git_is_pointed_at_the_lent_token_even_in_a_checkout_we_did_not_clone(tm
         on_line=answer.append,
         cwd=str(tmp_path),
         env={**env, **_machine_with_its_own_helper(tmp_path)},
+        stdin="protocol=https\nhost=github.com\n\n",
+    )
+
+    assert "password=ghs_lent" in answer
+    assert "password=stale-pat" not in answer
+
+
+def test_the_lent_token_reaches_git_without_gh(tmp_path):
+    """A sandbox image may ship an allowlist wrapper as ``gh`` that refuses
+    ``gh auth git-credential``. Routing the lent token through ``gh`` then fails
+    with git asking for a username nobody is there to type — so the token is
+    read straight out of the environment, and ``gh`` is only the fallback."""
+    env = _source(_Board()).forge_env(work())
+
+    answer: list[str] = []
+    RealProcess().spawn(
+        ["git", "credential", "fill"],
+        on_line=answer.append,
+        cwd=str(tmp_path),
+        env={**env, **_machine_with_its_own_helper(tmp_path, gh_refuses=True)},
         stdin="protocol=https\nhost=github.com\n\n",
     )
 

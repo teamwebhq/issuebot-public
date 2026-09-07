@@ -31,6 +31,7 @@ from issuebot.contracts import (
     SinkResult,
     WorkItem,
 )
+from issuebot.forge import git_config_parameters
 from issuebot.plugins.sources.base import Source
 from issuebot.plugins.sources.issuebear import messages, prompts
 from issuebot.plugins.sources.issuebear.client import AlreadyClaimed, IssuebotClient
@@ -932,10 +933,12 @@ class Issuebear(Source):
             "GIT_AUTHOR_EMAIL": email,
             "GIT_COMMITTER_NAME": author,
             "GIT_COMMITTER_EMAIL": email,
-            "GIT_CONFIG_PARAMETERS": (
-                "'credential.https://github.com.helper=' "
-                "'credential.https://github.com.helper=!gh auth git-credential'"
-            ),
+            # The agent runs git of its own, in processes issuebot never
+            # spawns and so cannot pass `-c` to. This is the only channel that
+            # reaches those, and it is the same list a clone is configured with
+            # (`issuebot.forge`) — a second, shorter spelling here would
+            # *replace* the clone's helpers rather than agree with them.
+            "GIT_CONFIG_PARAMETERS": git_config_parameters(),
         }
 
         if expires_at:

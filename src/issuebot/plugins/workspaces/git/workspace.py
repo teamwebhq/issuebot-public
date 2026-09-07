@@ -48,6 +48,11 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 from issuebot import provision
 from issuebot.config import Connection, conn_setting
 from issuebot.contracts import Changes, OutputKind
+from issuebot.forge import (
+    GH_CREDENTIAL_ARGS,
+    GH_CREDENTIAL_CONFIG,
+    GH_CREDENTIAL_KEY,
+)
 from issuebot.plugins.workspaces.base import Prepared, Workspace, WorkspaceProblem
 from issuebot.plugins.workspaces.git.settings import Settings
 from issuebot.process import REAL, Completed, Process
@@ -62,32 +67,10 @@ if TYPE_CHECKING:
 
 DivergenceKind = Literal["branch", "base"]
 
-# How a workspace authenticates an HTTPS GitHub remote: through the ``gh`` CLI,
-# which every run environment already holds a credential for (a Railway sandbox
-# is given ``GH_TOKEN`` and nothing else). git reads no such variable of its
-# own, so without this a clone of a private repo asks for a password nobody is
-# there to type.
-#
-# Set on each clone rather than in the user's global git config — issuebot owns
-# the workspaces it cuts, not the machine they sit on — and scoped to
-# github.com, so a remote on another host keeps whatever it already uses.
-GH_CREDENTIAL_KEY = "credential.https://github.com.helper"
-GH_CREDENTIAL_HELPER = "!gh auth git-credential"
-
-# Two entries, in this order. Adding a helper only *appends* to the list git
-# already has, and git asks every helper in turn and takes the first answer —
-# so a helper configured earlier on the machine (osxkeychain in Xcode's system
-# gitconfig, store on a Linux runner) answers first with whatever stale
-# personal credential it holds, and the push is rejected. An empty value is
-# git's documented reset of the list, so the first entry clears it and the
-# second makes ``gh`` the only helper there is.
-GH_CREDENTIAL_CONFIG = (
-    f"{GH_CREDENTIAL_KEY}=",
-    f"{GH_CREDENTIAL_KEY}={GH_CREDENTIAL_HELPER}",
-)
-
-# The same pair as command-line arguments, for a clone that has no config yet.
-GH_CREDENTIAL_ARGS = tuple(arg for entry in GH_CREDENTIAL_CONFIG for arg in ("-c", entry))
+# How a workspace authenticates its HTTPS GitHub remote: the one definition, in
+# core, shared with whichever source lends the token it reads (see
+# :mod:`issuebot.forge`). Set on each clone rather than in the user's global git
+# config — issuebot owns the workspaces it cuts, not the machine they sit on.
 
 
 class GitError(RuntimeError):
@@ -570,26 +553,39 @@ def _working_copy(
     else:
         private_dir(path.parent)
         Git(path.parent, proc).check("clone", "clone", *GH_CREDENTIAL_ARGS, repo, str(path))
+        # `-c` above authenticates the clone itself and is not written to the
+        # new copy's config, so it is persisted here too. The agent works
+        # inside this clone and runs git of its own; without this its first
+        # fetch or push authenticates as whatever the machine holds.
+        _use_gh_credentials(here)
 
     return str(path)
 
 
 def _use_gh_credentials(g: Git) -> None:
-    """Point this clone's git at ``gh``'s credential store.
+    """Write this clone's own credential helper list.
 
-    The reuse branch's half of what cloning does with
-    :data:`GH_CREDENTIAL_CONFIG`: a workspace has to authenticate the same way
+    Both branches above end here: cloning passes
+    :data:`GH_CREDENTIAL_CONFIG` with ``-c`` for the clone's own
+    authentication, and this persists the same list into the copy it made — a
+    workspace has to authenticate the same way
     whether this run cut it or an earlier one did. Idempotent, and failure is
     not fatal — a clone that already authenticates some other way keeps
     working.
 
-    Two commands for the two entries: the first replaces every helper this copy
-    has with the empty value that resets git's list, the second adds ``gh`` to
-    the now-empty list. Replacing rather than adding is also what keeps this
-    idempotent across reuses.
+    The first entry replaces every helper this copy has with the empty value
+    that resets git's list; each one after it is added to the now-empty list, in
+    order. Replacing rather than adding is also what keeps this idempotent
+    across reuses.
+
+    Driven off :data:`GH_CREDENTIAL_CONFIG` rather than naming the helpers
+    again, so the persisted list and the one the clone itself ran under cannot
+    disagree — the whole reason this function exists.
     """
-    g.git("config", "--local", "--replace-all", GH_CREDENTIAL_KEY, "")
-    g.git("config", "--local", "--add", GH_CREDENTIAL_KEY, GH_CREDENTIAL_HELPER)
+    for index, entry in enumerate(GH_CREDENTIAL_CONFIG):
+        _, _, value = entry.partition("=")
+        mode = "--replace-all" if index == 0 else "--add"
+        g.git("config", "--local", mode, GH_CREDENTIAL_KEY, value)
 
 
 def _start_point(g: Git, project: Connection, branch: str) -> str | None:
