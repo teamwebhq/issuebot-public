@@ -29,7 +29,7 @@ from conftest import (
     source_table,
     work,
 )
-from issuebot import release, sandbox_protocol
+from issuebot import plugins, release, sandbox_protocol
 from issuebot.config import Config, source_plugin
 from issuebot.contracts import Changed, Job, NeedsInput, Response, SkillRef, WorkItem
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
@@ -525,6 +525,51 @@ def test_the_environments_own_settings_never_reach_the_sandbox():
     assert "fake_env" not in raw
     assert "fake_env" not in raw["connections"][0]
     assert raw["connections"][0].get("executor") is None
+
+
+def test_settings_only_this_machine_can_honour_never_cross_the_wire():
+    """A path on the controller's filesystem names nothing in a sandbox. Sent as
+    it stands, a config could have a working local connection or a working
+    remote one and never both.
+
+    Which settings those are comes from each plugin's own `machine_local`
+    declaration, so this asserts against the registry rather than naming a
+    field — and keeps holding for a plugin that gains a directory later."""
+    local = {p.name: p.machine_local for p in plugins.every() if p.machine_local}
+    assert local, "no installed plugin declares a machine-local setting"
+
+    # Give every one of them a value, so the config would carry them all.
+    tables = {
+        **source_table(),
+        **{name: dict.fromkeys(keys, "/somewhere") for name, keys in local.items()},
+    }
+    provider = FakeProvider()
+    _executor(provider, context=ctx(plugin_settings=tables)).run(
+        _job(work()), reporter=RecordingReporter()
+    )
+
+    raw = dict(_sent(provider).config)
+
+    for name, keys in local.items():
+        sent = raw.get(name) or {}
+        assert not (keys & sent.keys()), f"{name} sent {keys & sent.keys()}"
+
+
+def test_the_rest_of_a_plugins_table_still_travels():
+    """Only the machine-local settings are dropped — the plugin still needs
+    everything else it was configured with."""
+    provider = FakeProvider()
+    tables = {
+        **source_table(),
+        "claude": {"command": "/opt/homebrew/bin/claude", "resume_sessions": True},
+    }
+    _executor(provider, context=ctx(plugin_settings=tables)).run(
+        _job(work()), reporter=RecordingReporter()
+    )
+
+    sent = dict(_sent(provider).config).get("claude") or {}
+
+    assert sent == {"resume_sessions": True}
 
 
 def test_infrastructure_secrets_come_from_the_provider():

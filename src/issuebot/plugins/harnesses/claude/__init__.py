@@ -32,6 +32,9 @@ PLUGIN = HarnessPlugin(
     name="claude",
     harness=ClaudeHarness,
     global_settings=GlobalSettings,
+    # `command` is a path on the machine that wrote it; a sandbox resolves
+    # `claude` on its own PATH.
+    machine_local=frozenset({"command"}),
     cli=claude_cli,
     doctor=ensure_claude_mcp,
 )

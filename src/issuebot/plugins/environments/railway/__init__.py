@@ -25,6 +25,10 @@ PLUGIN = EnvironmentPlugin(
     name="railway",
     environment=RailwayEnvironment,
     settings=RailwaySettings,
+    # The `railway` CLI's own path. A sandbox never reads this table — the
+    # environment's settings are dropped whole (`config.sandbox_config`) — but
+    # the fact belongs with the field either way.
+    machine_local=frozenset({"command"}),
     flat=False,
     cli=railway_cli,
     doctor=railway_doctor,

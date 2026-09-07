@@ -252,9 +252,59 @@ class SandboxEnvironment(ExecutionEnvironment):
             logger.warning("could not ask sandbox %s what it is", sandbox_id, exc_info=True)
             return ""
 
-        return parse_version(lines) if code == 0 else ""
+        found = parse_version(lines) if code == 0 else ""
 
-    def _align_version(self, sandbox_id: str, reporter: Reporter) -> None:
+        # The caller only needs "not the right version", and every way of
+        # getting there is that same answer (see above). But a user reading
+        # "issuebot (none)" cannot tell a sandbox with nothing installed from a
+        # probe that failed or answered in a shape this could not read — and
+        # the three have different fixes. So the reason goes to the log, once,
+        # where the next occurrence explains itself.
+        if not found:
+            logger.warning(
+                "sandbox %s did not report an issuebot version: %s said exit %s and %s",
+                sandbox_id,
+                " ".join(version_argv()),
+                code,
+                f"answered {lines[-3:]!r}" if lines else "printed nothing",
+            )
+
+        return found
+
+    def _skew_advice(self, installed: str, mode: BootMode) -> str:
+        """What the person watching this run can actually do about the skew.
+
+        Three causes wear the same symptom, and only one of them is answered by
+        rebuilding the template — which is what the message said in every case,
+        and is why "sandbox is running issuebot (none)" sent a user to rebuild a
+        template that was already correct:
+
+        * **Nothing installed, cold boot.** The template this machine's CLI
+          knows either does not exist or carries no issuebot. A template's name
+          is local to the CLI that built it, so "somebody built it once" is not
+          the question — this machine has to have.
+        * **A version installed, cold boot.** The template is real and behind:
+          rebuilding it is exactly the fix.
+        * **Any warm or resumed boot.** The filesystem came from a checkpoint,
+          which outlives the template it descended from. Rebuilding changes
+          nothing for this boot; the checkpoint has to go.
+        """
+        rebuild = self._provider.rebuild_command
+        if mode is not BootMode.COLD:
+            return (
+                f"This sandbox booted from a {mode.value} checkpoint, which holds whatever "
+                f"issuebot was installed when it was taken — rebuilding the template will not "
+                f"change that. Delete the checkpoint to boot cold from a fresh template."
+            )
+        if not installed:
+            return (
+                f"No issuebot in the sandbox at all, so its template is missing or empty on "
+                f"this machine. A template's name is local to the CLI that built it: run "
+                f"'{rebuild}' here, as the user that runs the listener."
+            )
+        return f"Rebuild the template with: {rebuild}"
+
+    def _align_version(self, sandbox_id: str, reporter: Reporter, mode: BootMode) -> None:
         """Bring the sandbox to this controller's release before any work runs.
 
         The sandbox executes issuebot's own code, so a run on a different build
@@ -265,9 +315,10 @@ class SandboxEnvironment(ExecutionEnvironment):
         because the version the controller asked for is the only one that is
         right.
 
-        The user hears about it, not just the log: until the template is rebuilt
-        this costs them an install on every cold boot, and they are the only one
-        who can stop it.
+        The user hears about it, not just the log: until whatever is behind is
+        fixed this costs them an install on every boot, and they are the only
+        one who can stop it. What to fix depends on how the sandbox came up —
+        see :meth:`_skew_advice`.
 
         An update that fails raises, which :meth:`run` turns into a failed
         response. Loud beats working on code we already know is the wrong code.
@@ -282,7 +333,7 @@ class SandboxEnvironment(ExecutionEnvironment):
                 "text",
                 f"sandbox is running issuebot {installed or '(none)'}, this "
                 f"controller is {mine} — updating it for this run. "
-                f"Rebuild the template with: {self._provider.rebuild_command}",
+                f"{self._skew_advice(installed, mode)}",
             )
         )
 
@@ -504,7 +555,7 @@ class SandboxEnvironment(ExecutionEnvironment):
                 self._api.sandbox_started(
                     run_id, environment=self.name, sandbox_id=booted.sandbox_id
                 )
-            self._align_version(booted.sandbox_id, reporter)
+            self._align_version(booted.sandbox_id, reporter, booted.mode)
             result, exit_code = self._collect(
                 booted.sandbox_id,
                 worker_argv(work, run_id=run_id, connection=self._project),

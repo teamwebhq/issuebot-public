@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -105,6 +106,29 @@ def _mirror_cancel(cancel: threading.Event | None, stop: threading.Event) -> Non
         if cancel is not None and cancel.is_set():
             stop.set()
             return
+
+
+# Claude Code refuses `--dangerously-skip-permissions` when it is running as
+# root, unless it is told it is inside a sandbox. That check exists because the
+# flag removes every guardrail, which on a real machine's root account is
+# indefensible — but a per-task sandbox that is created for one run and
+# destroyed after it is exactly the case the escape hatch is for.
+#
+# Set only when this process really is root: on any other account Claude Code
+# never asks the question, and setting it there would be claiming something
+# untrue about the machine.
+_SANDBOX_ENV = {"IS_SANDBOX": "1"}
+
+
+def _root_env() -> dict[str, str]:
+    """The overlay that lets an unattended launch run as root, or ``{}``.
+
+    ``geteuid`` is the same question Claude Code itself asks, so this is on
+    exactly when its check would otherwise fire. Absent on Windows, where the
+    check does not exist either.
+    """
+    euid = getattr(os, "geteuid", None)
+    return dict(_SANDBOX_ENV) if euid is not None and euid() == 0 else {}
 
 
 class ClaudeHarness(Harness):
@@ -247,7 +271,14 @@ class ClaudeHarness(Harness):
                     reporter.event(ev)
 
             code = self._proc.spawn(
-                argv, on_line=on_line, cwd=spec.folder, env=spec.env, cancel=stop
+                argv,
+                on_line=on_line,
+                cwd=spec.folder,
+                # The launch's own environment first: `_root_env` states a fact
+                # about this machine, which nothing upstream is in a position
+                # to know or to override.
+                env={**(spec.env or {}), **_root_env()},
+                cancel=stop,
             )
 
         return LaunchResult(

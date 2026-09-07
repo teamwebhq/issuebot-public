@@ -331,6 +331,12 @@ done = "review"
 sinks = ["github"]
 ```
 
+Some settings name a path on this machine: `[claude] command`, `[git]
+worktree_root` and `[git] clone_root`. A task that runs in a sandbox does not
+get them — the path does not exist there — so the sandbox finds `claude` on its
+own `PATH` and uses its own state directory. Thus one configuration can have a
+local connection with a full path and a railway connection at the same time.
+
 ### Validation
 
 issuebot rejects a configuration that it cannot use. It reports the problems
@@ -805,11 +811,11 @@ connection has no token and the environment has no token.
 ### Build the tooling template
 
 A sandbox starts from a template with the tools that the agent needs: `git`,
-`curl`, `gh`, and the exact release of the controller. Each build step first
-looks for the tool, and installs it only if the Railway base image does not
-have it. Today that image has all three tools, so the build installs only the
-controller. Build the template one time for each Railway project, while you run
-the controller from a released wheel:
+`curl`, `gh`, `chromium`, and the exact release of the controller. Each build
+step first looks for the tool, and installs it only if the Railway base image
+does not have it. Today that image has all of them but `chromium`. Build the
+template one time for each Railway project, while you run the controller from a
+released wheel:
 
 ```sh
 issuebot railway build-template                    # in the default project
@@ -819,6 +825,21 @@ issuebot railway build-template --connection web   # with the token of a connect
 The name of the template is local to the CLI that builds it. Build the template
 on the machine that runs `issuebot listen`, and with the same user. If you build
 it elsewhere, the sandbox cannot find the template.
+
+#### The browser in a sandbox
+
+`chromium` is in the template so that an agent can open its own change in a
+browser. The sandbox runs as `root`, and the sandbox of Chromium cannot start
+as `root`. Thus the agent must give the `--no-sandbox` flag:
+
+```sh
+chromium --headless --no-sandbox --screenshot=/tmp/page.png http://localhost:3000
+```
+
+Tell the agent this in the instructions of your board. issuebot cannot add the
+flag, because the agent selects its own browser tools and its own arguments.
+Puppeteer and Playwright have the same requirement, and each has its own way to
+give the flag and to use the browser of the system.
 
 ### Configure a railway connection
 

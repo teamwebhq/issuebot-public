@@ -494,6 +494,23 @@ def default_config_path() -> Path:
     return config_dir() / "config.toml"
 
 
+def _without_local_paths(name: str, settings: Mapping[str, Any]) -> dict[str, Any]:
+    """One plugin's table with the settings only this machine can honour removed.
+
+    Which those are is the plugin's own declaration (``Plugin.machine_local``),
+    read off the registry — an executable's path, a directory this install keeps
+    its work in. Core naming the fields itself would be one plugin's vocabulary
+    in neutral code, and would need editing every time a plugin gained a
+    directory (ADR-0002).
+
+    A table whose plugin is not installed here travels whole: an unknown table
+    is not this function's to edit, and ``validate_config`` reports it by name.
+    """
+    plugin = plugins.named(name)
+    local = plugin.machine_local if plugin is not None else frozenset()
+    return {key: value for key, value in settings.items() if key not in local}
+
+
 def sandbox_config(
     connection: Connection,
     *,
@@ -517,12 +534,24 @@ def sandbox_config(
       reads them. They are also where a provider credential lives: a Railway
       token that creates sandboxes must not travel *into* one.
 
+    * **Nothing only this machine can honour.** Each plugin's own
+      ``machine_local`` settings are dropped: an executable's path
+      (``/opt/homebrew/bin/claude``, an absolute ``railway`` for a
+      service-managed runner), a directory this install keeps its work in
+      (git's ``worktree_root``/``clone_root``). None of those exist on the far
+      side, and leaving them in means a config can have a working local
+      connection or a working remote one, never both. The sandbox resolves the
+      plugin's own defaults instead — a name on ``PATH``, its own state
+      directory — which is what the image is for.
+
     Dropping ``executor`` rather than only its table is what keeps the result a
     config that would pass :func:`validate_config` — an environment named with
     its settings removed is exactly what that function rejects.
     """
     table = connection.model_dump(exclude_none=True)
-    tables = {name: dict(settings) for name, settings in plugin_settings.items()}
+    tables = {
+        name: _without_local_paths(name, settings) for name, settings in plugin_settings.items()
+    }
 
     # One name covers both: a plugin's connection table and its global table are
     # keyed by the same plugin name.

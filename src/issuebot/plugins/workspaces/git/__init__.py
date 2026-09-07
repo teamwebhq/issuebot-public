@@ -26,6 +26,9 @@ PLUGIN = WorkspacePlugin(
     workspace=GitWorkspace,
     settings=Settings,
     global_settings=GlobalSettings,
+    # Both roots are directories on the machine that wrote them; a sandbox has
+    # its own state directory and resolves the defaults there.
+    machine_local=frozenset({"worktree_root", "clone_root"}),
     flat=True,
     validate=validate,
     cli=git_cli,

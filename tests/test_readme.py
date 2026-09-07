@@ -388,6 +388,7 @@ NOT_OURS = frozenset(
     {
         "--dangerously-skip-permissions",
         "--model",
+        "--no-sandbox",
         "--plugin-dir",
         "--strict-mcp-config",
     }

@@ -38,6 +38,17 @@ class Plugin:
             stays fully resolvable: a config may name it and `plugins.get`
             finds it. For a plugin that exists to be wired up deliberately
             (the `fake` harness, the `fake` sink) rather than chosen.
+        machine_local: Setting names whose value only means something on the
+            machine the config was written on — an executable's path, a
+            directory this install keeps its work in. They are dropped from the
+            config a run carries to another machine
+            (`config.sandbox_config`), where the path names nothing and the
+            plugin's own default is right.
+
+            Declared by the plugin because only the plugin knows which of its
+            settings are paths. Core reading a list of field names it spelled
+            itself would be one plugin's vocabulary in neutral code, and would
+            need editing every time a plugin added a directory (ADR-0002).
     """
 
     name: str
@@ -49,6 +60,7 @@ class Plugin:
     doctor: Any = None
     wizard: Any = None
     hidden: bool = False
+    machine_local: frozenset[str] = frozenset()
 
     @property
     def claimed_keys(self) -> frozenset[str]:

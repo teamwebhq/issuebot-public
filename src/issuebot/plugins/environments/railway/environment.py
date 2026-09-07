@@ -45,9 +45,15 @@ TEMPLATE = "issuebot-tools"
 # Every tool a run needs in the sandbox, and the shell that installs one when
 # the base image does not carry it.
 #
-# Railway's base image carries all of these today (Debian 13, as root), so the
-# usual build does nothing at all — but it changes without notice, and a tool
-# that quietly disappears surfaces late and badly: a clone that cannot
+# Two kinds are in here. Most are tools *issuebot* runs — git and gh, without
+# which a run cannot clone or open a pull request. `chromium` is a tool the
+# *agent* runs: nothing in issuebot calls it, and a task that asks the agent to
+# check its own change in a browser needs it there. The distinction changes
+# nothing about how they are installed, so they share one list.
+#
+# Railway's base image carries all but `chromium` today (Debian 13, as root),
+# so a build installs one thing — but the image changes without notice, and a
+# tool that quietly disappears surfaces late and badly: a clone that cannot
 # authenticate, or a `gh pr create` that fails after the agent has done all the
 # work. Checking at build time costs nothing when the tool is there and fixes
 # it when it is not.
@@ -82,6 +88,19 @@ REQUIRED_TOOLS: dict[str, str] = {
         " > /etc/apt/sources.list.d/github-cli.list"
         f" && {_APT_INSTALL} gh"
     ),
+    # For an agent asked to check its own change in a browser. Debian's own
+    # package, so no third-party repository and no pinned version.
+    #
+    # `fonts-liberation` is not optional decoration: `--no-install-recommends`
+    # leaves the image with no usable font, and chromium then renders text as
+    # blank boxes — a screenshot that looks like a broken page rather than a
+    # missing dependency.
+    #
+    # Chromium's own sandbox cannot start as root, which is what a Railway
+    # sandbox runs as, so the agent has to launch it with `--no-sandbox` (see
+    # the README). Nothing here can pass that flag for it: the agent chooses
+    # its own browser tooling and its own arguments.
+    "chromium": f"{_APT_INSTALL} chromium fonts-liberation",
 }
 
 

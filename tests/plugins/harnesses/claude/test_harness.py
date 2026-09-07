@@ -5,6 +5,7 @@ is Claude-only."""
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -56,6 +57,47 @@ def test_claude_skips_permissions_for_headless_autonomy(reporter):
     assert spawn.argv is not None
     assert "--dangerously-skip-permissions" in spawn.argv
     assert "--permission-mode" not in spawn.argv
+
+
+def test_claude_is_told_it_is_sandboxed_when_it_runs_as_root(reporter, monkeypatch):
+    """Claude Code refuses `--dangerously-skip-permissions` as root unless it is
+    told it is in a sandbox, and a per-task sandbox runs as root. Without this
+    the launch exits before it starts, with the flag's own error."""
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    spawn = SpawnRecorder()
+
+    ClaudeHarness(command="claude", proc=spawn).launch(_spec(), reporter)
+
+    assert (spawn.env or {})["IS_SANDBOX"] == "1"
+
+
+def test_claude_claims_nothing_about_a_machine_it_is_not_root_on(reporter, monkeypatch):
+    """Claude Code never asks the question off root, so saying it is sandboxed
+    there would be asserting something untrue about the machine."""
+    monkeypatch.setattr(os, "geteuid", lambda: 501)
+    spawn = SpawnRecorder()
+
+    ClaudeHarness(command="claude", proc=spawn).launch(_spec(), reporter)
+
+    assert "IS_SANDBOX" not in (spawn.env or {})
+
+
+def test_the_launchs_own_environment_still_reaches_the_agent(reporter, monkeypatch):
+    """The root overlay is added to what the run was handed, not instead of it —
+    the forge token and git identity ride there."""
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    spawn = SpawnRecorder()
+    spec = LaunchSpec(
+        prompt="do the thing",
+        folder="/work/alpha",
+        mcp_servers=[_BOARD],
+        env={"GH_TOKEN": "ghs_lent"},
+    )
+
+    ClaudeHarness(command="claude", proc=spawn).launch(spec, reporter)
+
+    assert (spawn.env or {})["GH_TOKEN"] == "ghs_lent"
+    assert (spawn.env or {})["IS_SANDBOX"] == "1"
 
 
 def test_claude_uses_stream_json_output(reporter):
