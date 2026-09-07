@@ -34,7 +34,6 @@ from issuebot.config import Connection
 from issuebot.plugins.environments.railway import settings as railway_settings
 from issuebot.process import REAL, Completed, Process
 from issuebot.sandbox import SandboxEnvironment
-from issuebot.sandbox_protocol import update_argv
 
 if TYPE_CHECKING:
     from issuebot.runner import Wiring
@@ -44,10 +43,19 @@ if TYPE_CHECKING:
 # instead of installing them on every fresh sandbox.
 TEMPLATE = "issuebot-tools"
 
-# `curl` fetches issuebot's installer; `uv` is what that installer uses. The
-# installer bootstraps uv for itself when an image lacks it, so this is a
-# saved download per cold boot rather than a requirement.
-TEMPLATE_PACKAGES = ["git", "gh", "curl", "nodejs", "npm", "uv"]
+# What the template adds to Railway's base sandbox image. That image already
+# carries git, curl, node and npm, and issuebot's installer bootstraps uv for
+# itself, so `gh` — which the github sink shells out to for pull requests — is
+# the only tool genuinely missing.
+TEMPLATE_PACKAGES = ["gh"]
+
+# ponytail: the base sandbox image is Debian, so apt-get is the package manager.
+# A build step must exit 0, so a failure here fails `build-template` loudly
+# rather than producing a template with a tool missing.
+PACKAGE_INSTALL = (
+    "apt-get update && DEBIAN_FRONTEND=noninteractive "
+    "apt-get install -y --no-install-recommends {packages}"
+)
 
 # How long a sandbox may sit idle before Railway reclaims it.
 _IDLE_TIMEOUT_MINUTES = 120
@@ -55,7 +63,18 @@ _IDLE_TIMEOUT_MINUTES = 120
 # Infrastructure secrets the agent needs inside the sandbox, referenced as
 # Railway shared variables so the values never pass through this process. The
 # `${{shared.NAME}}` form is resolved by Railway at sandbox boot.
-_SHARED_SECRETS = ("ANTHROPIC_API_KEY", "GH_TOKEN")
+#
+# Both model credentials are named because only the user knows which they hold:
+# `claude` reads a subscription token from CLAUDE_CODE_OAUTH_TOKEN and an API
+# key from ANTHROPIC_API_KEY, and prefers the key when both are set.
+#
+# ponytail: every name is referenced whether or not a shared variable of that
+# name exists, because asking Railway which exist is a round trip per boot for
+# a list this short. What Railway does with a reference to a missing variable
+# is undocumented; if an unset one turns out to reach the sandbox as literal
+# text, set it as an empty shared variable (the README says so) or look the
+# names up at boot.
+_SHARED_SECRETS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GH_TOKEN")
 
 
 class RailwayError(RuntimeError):
@@ -206,8 +225,12 @@ class RailwayProvider:
         return [c["name"] for c in json.loads(out or "[]")]
 
     def create_checkpoint(self, sandbox_id: str, name: str) -> None:
-        """Snapshot a running sandbox's filesystem into a named checkpoint."""
-        self._check("sandbox", "checkpoint", "create", sandbox_id, name)
+        """Snapshot a running sandbox's filesystem into a named checkpoint.
+
+        The name is the CLI's positional argument and the source sandbox is
+        ``--id``; passing both positionally names the sandbox as the checkpoint
+        and snapshots whichever sandbox is 'active' on this machine."""
+        self._check("sandbox", "checkpoint", "create", name, "--id", sandbox_id)
 
     def delete_checkpoint(self, name: str) -> None:
         """Delete a named checkpoint."""
@@ -218,20 +241,34 @@ class RailwayProvider:
     def build_template(self, name: str = TEMPLATE, packages: list[str] | None = None) -> None:
         """Build the named sandbox template with this released issuebot pinned.
 
-        Verify the ``--package`` and ``--run`` flags against the installed CLI
-        (``railway sandbox template --help``) — Railway's sandbox docs are
-        Priority Boarding and these flag forms are not pinned upstream."""
+        A template is an ordered list of shell build steps, one per
+        ``--command``, each of which must exit 0: the first installs the tools
+        the base image lacks, the second installs this exact issuebot release.
+
+        ``--wait`` polls until the build reports READY or FAILED, so a template
+        this returns from is one ``create --template`` can boot — without it the
+        build is still running when the caller says it is built.
+
+        Verify these flags against the installed CLI (``railway sandbox
+        template build --help``) — Railway's sandbox docs are Priority Boarding
+        and these flag forms are not pinned upstream."""
         if not release.is_installed_wheel():
             raise RailwayError(
                 "building a remote template requires a released issuebot wheel; "
                 f"install it with: {release.INSTALL_COMMAND}"
             )
 
-        argv = ["sandbox", "template", "build", name]
-        for package in packages if packages is not None else TEMPLATE_PACKAGES:
-            argv += ["--package", package]
+        # The name is local to the CLI that built it (`template list` shows only
+        # this machine's), which is why it is the runner itself that builds.
+        argv = ["sandbox", "template", "build", "--name", name, "--wait"]
 
-        argv += ["--run", shlex.join(update_argv(issuebot.__version__))]
+        wanted = packages if packages is not None else TEMPLATE_PACKAGES
+        if wanted:
+            argv += ["--command", PACKAGE_INSTALL.format(packages=shlex.join(wanted))]
+
+        # A build step is a shell instruction, so the installer goes in as the
+        # shell program `release` already spells, not as an argv.
+        argv += ["--command", release.installer_command(issuebot.__version__)]
 
         self._check(*argv)
 

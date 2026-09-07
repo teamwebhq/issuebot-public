@@ -13,7 +13,6 @@ without learning the plugin's name.
 from __future__ import annotations
 
 import json
-import shlex
 
 import pytest
 from typer.testing import CliRunner
@@ -31,7 +30,6 @@ from issuebot.plugins.environments.railway.settings import TOKEN_VARS, ambient_t
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.process import Completed, RecordingProcess
 from issuebot.runner import wire
-from issuebot.sandbox_protocol import update_argv
 
 
 def _provider(proc: RecordingProcess | None = None, **kwargs) -> RailwayProvider:
@@ -153,6 +151,7 @@ def test_secrets_are_shared_variable_references_not_values():
     """Their values never pass through this process; Railway resolves each
     reference when it boots the sandbox."""
     secrets = _provider().secret_env()
+    assert secrets["CLAUDE_CODE_OAUTH_TOKEN"] == "${{shared.CLAUDE_CODE_OAUTH_TOKEN}}"
     assert secrets["ANTHROPIC_API_KEY"] == "${{shared.ANTHROPIC_API_KEY}}"
     assert secrets["GH_TOKEN"] == "${{shared.GH_TOKEN}}"
 
@@ -274,7 +273,9 @@ def test_creating_and_deleting_a_checkpoint():
     provider.create_checkpoint("sbx_1", "task-t1")
     provider.delete_checkpoint("task-t1")
 
-    assert proc.calls[0][-3:] == ["create", "sbx_1", "task-t1"]
+    # The name is the positional argument and the sandbox is `--id`: swapping
+    # them names the checkpoint after the sandbox and snapshots the wrong one.
+    assert proc.calls[0][-4:] == ["create", "task-t1", "--id", "sbx_1"]
     assert proc.calls[1][-2:] == ["delete", "task-t1"]
 
 
@@ -284,13 +285,26 @@ def test_creating_and_deleting_a_checkpoint():
 
 
 def test_building_the_template_installs_the_declared_packages():
+    """Packages are one shell build step, not a flag: the CLI takes `--command`
+    steps only, so the base image's package manager has to be spelled out."""
     proc = RecordingProcess()
     _provider(proc).build_template()
 
     argv = proc.calls[0]
-    assert argv[:5] == ["railway", "sandbox", "template", "build", TEMPLATE]
-    assert "--package" in argv
-    assert "git" in argv and "gh" in argv
+    assert argv[:4] == ["railway", "sandbox", "template", "build"]
+    assert argv[argv.index("--name") + 1] == TEMPLATE
+
+    steps = [argv[i + 1] for i, word in enumerate(argv) if word == "--command"]
+    assert any("apt-get install" in step and "gh" in step for step in steps)
+
+
+def test_building_the_template_waits_for_the_build_to_finish():
+    """`create --template` cannot boot a build that is still running, so the
+    command must not report a template that is not ready yet."""
+    proc = RecordingProcess()
+    _provider(proc).build_template()
+
+    assert "--wait" in proc.calls[0]
 
 
 def test_the_template_pins_the_issuebot_that_built_it():
@@ -299,7 +313,8 @@ def test_the_template_pins_the_issuebot_that_built_it():
     _provider(proc).build_template()
 
     argv = proc.calls[0]
-    assert argv[argv.index("--run") + 1] == shlex.join(update_argv(VERSION))
+    steps = [argv[i + 1] for i, word in enumerate(argv) if word == "--command"]
+    assert steps[-1] == release.installer_command(VERSION)
 
 
 def test_a_template_cannot_be_built_from_a_source_install(monkeypatch):

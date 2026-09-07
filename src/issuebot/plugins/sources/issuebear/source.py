@@ -225,6 +225,17 @@ def _display_name(user_id: str, members: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _on_roster(user_id: str, members: list[dict[str, Any]]) -> bool:
+    """Whether the board roster carries ``user_id``.
+
+    Board membership is what makes an id able to hold work: an id the roster
+    does not carry cannot be assigned anything, so the board refuses the write.
+    Only meaningful against a roster we actually read — an empty ``members``
+    says nothing about anybody (see :meth:`IssuebearSource._roster`).
+    """
+    return any(str(member.get("user_id", "")) == user_id for member in members)
+
+
 def _human_id(user_id: str, members: list[dict[str, Any]]) -> str:
     """The person behind a board user id: an agent's owner, or the id itself.
 
@@ -621,6 +632,19 @@ class Issuebear(Source):
 
         roster = self._roster() if members is None else members
         human_id = _human_id(requester_id, roster)
+
+        # A requester the roster does not carry is nobody this task can be
+        # given back to. Parade raises its own housekeeping work — a
+        # documentation refresh — against its System principal, which holds no
+        # board membership and no inbox: handing work there is a write the
+        # board refuses and a promise nobody would answer. Answered as "nobody
+        # behind this task", which leaves the assignee alone and keeps the id
+        # out of the launch prompt.
+        if roster and not _on_roster(human_id, roster):
+            logger.info(
+                "requester of %s is not on the board roster; nobody to hand back to", work.ref
+            )
+            return "", ""
 
         return human_id, _display_name(human_id, roster)
 

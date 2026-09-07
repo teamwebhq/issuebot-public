@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from issuebot import cli
 from issuebot.plugins.environments.railway import cli as railway_cli
-from issuebot.plugins.environments.railway.environment import RailwayProvider
+from issuebot.plugins.environments.railway.environment import TEMPLATE, RailwayProvider
 from issuebot.process import RecordingProcess
 
 runner = CliRunner()
@@ -44,10 +44,12 @@ def test_railway_build_template_builds_the_shared_template(monkeypatch: pytest.M
     result = runner.invoke(cli.app, ["railway", "build-template"])
 
     assert result.exit_code == 0, result.output
+
+    # What the template *contains* is the provider's test; this one checks the
+    # command reaches it, under the connection's own credential.
     argv = proc.calls[0]
     assert argv[:4] == ["railway", "sandbox", "template", "build"]
-    for package in ("git", "gh", "nodejs"):
-        assert package in argv
+    assert argv[argv.index("--name") + 1] == TEMPLATE
 
 
 def test_railway_prune_checkpoints_deletes_only_aged_task_checkpoints(

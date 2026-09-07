@@ -75,10 +75,15 @@ def build_template(
 ) -> None:
     """Build the shared sandbox template.
 
-    A prebuilt template lets sandbox `create` start warm (git/gh/node already
-    installed) instead of re-installing them on every fresh sandbox. The
-    template lives in one Railway project, so with connections across several
-    projects run this once per project with ``--connection``.
+    A prebuilt template lets sandbox `create` start warm (gh and this exact
+    issuebot release already installed) instead of installing them on every
+    fresh sandbox. The template lives in one Railway project, so with
+    connections across several projects run this once per project with
+    ``--connection``.
+
+    The template's name is local to the CLI that built it, so run this on the
+    machine — and as the user — that runs ``issuebot listen``; a template built
+    elsewhere is one ``create --template`` cannot resolve.
     """
     RailwayProvider(auth=auth_for(connection)).build_template()
     typer.echo(f"Built template '{TEMPLATE}'.")

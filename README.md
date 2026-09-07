@@ -745,26 +745,78 @@ from a development checkout.
    `--set railway.token_kind=project|account` to tell the CLI which variable to
    read the token from: `RAILWAY_TOKEN` or `RAILWAY_API_TOKEN`. A connection
    with no token uses the variable that the `issuebot listen` process has.
-4. The secrets of the agent, as **shared variables in that Railway
-   environment**: `ANTHROPIC_API_KEY` for the `claude` harness, and `GH_TOKEN`
-   to clone and to push. issuebot points to these shared variables, but does not
-   read them. issuebot sends the board URLs and the agent PAT from your
-   configuration.
+4. A **model credential** for the harness, as a shared variable in that
+   Railway environment. See [Sandbox credentials](#sandbox-credentials).
+5. `GH_TOKEN`, as a shared variable, **only if your board lends no git
+   credentials**. See [Sandbox credentials](#sandbox-credentials).
+
+issuebot points to these shared variables, but does not read them. issuebot
+sends the board URLs and the agent PAT from your configuration.
+
+#### Sandbox credentials
+
+Put each credential in a **shared variable of the Railway environment**, with
+the name that this section gives. issuebot points the sandbox at these names.
+A shared variable with a different name does not reach the sandbox.
+
+##### Model credential
+
+The `claude` harness needs one of these two variables. Set one only.
+
+**Recommended: `CLAUDE_CODE_OAUTH_TOKEN`.** This is your Claude subscription,
+and it needs a Pro, Max, Team or Enterprise plan. To make the token:
+
+1. Run `claude setup-token` on your own machine. Your browser opens.
+2. Approve the access. The command prints the token.
+3. Copy the token. The command saves it nowhere.
+4. Put the token in a shared variable with the name
+   `CLAUDE_CODE_OAUTH_TOKEN`.
+
+The token is good for one year. It belongs to the person who made it, and all
+runs use the limits of that one subscription. Thus more `max_concurrent` tasks
+can reach the limit and stop.
+
+**Alternative: `ANTHROPIC_API_KEY`.** Make an API key in the
+[Claude Console](https://console.anthropic.com/settings/keys). The API key
+bills for each token, and it has no subscription limit, so it is the better
+credential for a runner that a team shares.
+
+Do not set both. Claude Code uses `ANTHROPIC_API_KEY` first, and then the
+subscription token is dead weight.
+
+> **Note.** issuebot points the sandbox at both names. If your logs show an
+> unresolved `${{shared.…}}` value for the variable that you did not set, make
+> that shared variable with an empty value.
+
+##### Git credential
+
+**`GH_TOKEN` is optional.** A board with the GitHub App integration lends a
+short-lived token for each run. The token has the identity of the app, and it
+replaces `GH_TOKEN` in the sandbox. Then you do not have to set `GH_TOKEN`.
+
+Set `GH_TOKEN` if your board lends no credentials. Without a token, the
+sandbox cannot clone a private repository, and it cannot push. Give the token
+these scopes: `repo` and `read:org`. If a run cannot borrow a token, the log
+gives a warning and the run uses `GH_TOKEN`.
 
 `issuebot doctor` gives a warning if the CLI is absent, or if a railway
 connection has no token and the environment has no token.
 
 ### Build the tooling template
 
-A sandbox starts from a template with the tools that the agent needs: git, gh,
-curl, node, npm and uv, plus the controller's exact release wheel. Build the
-template one time for each Railway project, while running the controller from a
-released wheel:
+A sandbox starts from a template with the tools that the agent needs. The
+Railway base image supplies git, curl, node and npm. The template adds `gh` and
+the exact release of the controller. Build the template one time for each
+Railway project, while you run the controller from a released wheel:
 
 ```sh
 issuebot railway build-template                    # in the default project
 issuebot railway build-template --connection web   # with the token of a connection
 ```
+
+The name of the template is local to the CLI that builds it. Build the template
+on the machine that runs `issuebot listen`, and with the same user. If you build
+it elsewhere, the sandbox cannot find the template.
 
 ### Configure a railway connection
 

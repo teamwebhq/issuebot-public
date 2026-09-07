@@ -485,6 +485,21 @@ def test_a_handoff_to_the_agent_itself_with_no_requester_changes_nothing():
     assert len(api.comments) == 1
 
 
+def test_a_handoff_on_work_nobody_on_the_board_asked_for_changes_nothing():
+    """Parade raises its own housekeeping work against a System principal that
+    holds no board membership and no inbox. Handing a finished refresh there is
+    a write the board refuses, so the task keeps the assignee it has and Parade
+    closes its own work itself."""
+    api = FakeApi(
+        members=_ROSTER, task={"id": "t1", "reference": "ISS-1", "requester_id": "u-system"}
+    )
+
+    _source(api, agent_id="u-hetzner").apply(work(), Handoff(assignee="Hetzner", note="over to me"))
+
+    assert api.updates == []
+    assert len(api.comments) == 1
+
+
 def test_a_needs_input_decision_marks_the_task_awaiting_input_only():
     """The question reached the thread as the agent's own comment. Posting it
     again in the runner's voice is why one question arrived three times."""
