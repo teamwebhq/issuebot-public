@@ -64,12 +64,17 @@ class PrPolicy:
     reviewers: tuple[str, ...] = ()
 
 
-def _pr_policy(payload: object) -> PrPolicy:
+def pr_policy(payload: object) -> PrPolicy:
     """One step's pull-request policy from its wire object, or the default.
 
     Read leniently, like the rest of a work item: a step that sent no ``pr`` at
     all, and one that sent only part of it, both get the defaults for whatever
-    they left out rather than failing the item."""
+    they left out rather than failing the item.
+
+    Shared rather than private to this module: the board's payload and the
+    sandbox wire (:mod:`issuebot.sandbox_protocol`) carry the same object, and
+    a second reader of it would be a second set of defaults to keep in step.
+    """
     if not isinstance(payload, Mapping):
         return PrPolicy()
 
@@ -191,7 +196,7 @@ class WorkItem:
             prompt=payload.get("prompt"),
             mode=payload.get("mode"),
             agent_instructions=payload.get("agent_instructions"),
-            pr=_pr_policy(payload.get("pr")),
+            pr=pr_policy(payload.get("pr")),
         )
 
     @property

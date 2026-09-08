@@ -768,6 +768,7 @@ class Issuebear(Source):
                 comment_excerpt=work.comment_excerpt or "",
                 agent_id=self._agent_id or "",
                 permits=permits,
+                agent_instructions=work.agent_instructions,
             )
         else:
             # One roster read serves both halves of the identity block: the

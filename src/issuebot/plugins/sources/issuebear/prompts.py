@@ -353,6 +353,7 @@ def render_mention_prompt(
     comment_excerpt: str,
     agent_id: str,
     permits: frozenset[OutputKind] = ALL_OUTPUT_KINDS,
+    agent_instructions: str | None = None,
 ) -> str:
     """Render `document` — the board's `respond_mention` document — for one
     mention session.
@@ -364,6 +365,11 @@ def render_mention_prompt(
     GET /me) the self-assign block is replaced with a note to reply instead.
     ``permits`` defaults to every kind — a mention-shaped ``Job`` (no
     ``changes``) should pass its own narrower set once a caller has one to give.
+
+    ``agent_instructions`` is the board's or step's own wording for the agent,
+    filled the same way here as in :func:`render_work_prompt`: the tag belongs
+    to the document vocabulary, not to one kind of run, so a board that writes
+    its instructions into a ``respond_mention`` document gets them.
     """
     if agent_id:
         # Build the concrete self-assign instruction with the agent's own user id.
@@ -380,5 +386,6 @@ def render_mention_prompt(
         actor_name=actor_name,
         comment_excerpt=comment_excerpt,
         self_assign_instruction=self_assign_instruction,
+        agent_instructions=agent_instructions or "",
     )
     return _append_response_block(rendered, permits)

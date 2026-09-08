@@ -22,7 +22,7 @@ from conftest import (
 )
 from issuebot import plugins, runner, worker
 from issuebot.config import Connection, conn_setting, harness_settings
-from issuebot.contracts import Response, SkillRef, WorkItem
+from issuebot.contracts import PrPolicy, Response, SkillRef, WorkItem
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.plugins.workspaces.base import Workspace
 from issuebot.process import REAL
@@ -238,6 +238,23 @@ def test_the_boards_run_preferences_are_taken_off_the_wire(cfg, ran):
     assert work.harness == "codex"
     assert work.model == "gpt-5"
     assert work.agent_instructions == "Run the checks."
+
+
+def test_the_steps_composition_and_pr_policy_are_taken_off_the_wire(cfg, ran):
+    """Neither the composed prompt, the mode nor the branch policy is on the
+    task record, so a sandboxed run reads the step's wishes from the wire or
+    silently does something else than the same run does locally."""
+    wire = WorkerEnv(
+        prompt="Do {reference} the step's way.",
+        mode="research",
+        pr=PrPolicy(create=False, draft=True, reviewers=("ada",)),
+    )
+    _run(cfg, wire)
+
+    work: WorkItem = ran["work"]
+    assert work.prompt == "Do {reference} the step's way."
+    assert work.mode == "research"
+    assert work.pr == PrPolicy(create=False, draft=True, reviewers=("ada",))
 
 
 def test_the_agent_id_is_taken_off_the_wire(cfg, ran):

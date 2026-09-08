@@ -118,6 +118,21 @@ def test_render_mention_prompt_contains_all_template_fields() -> None:
     assert "u-agent-42" in out
 
 
+def test_render_mention_prompt_fills_the_boards_own_instructions() -> None:
+    """`{agent_instructions}` is one document tag, not one kind of run's: a
+    board that writes its step instructions into its `respond_mention`
+    document must get them, exactly as a `work_task` document does."""
+    out = render_mention_prompt(
+        document="{actor_name}: {comment_excerpt}\n{agent_instructions}",
+        reference="ISS-10",
+        actor_name="Alice",
+        comment_excerpt="Can you fix the login bug?",
+        agent_id="u-agent-42",
+        agent_instructions="Answer in British English.",
+    )
+    assert "Answer in British English." in out
+
+
 def test_render_mention_prompt_handles_empty_agent_id() -> None:
     """render_mention_prompt does not crash when agent_id is empty, and falls
     back to a note that self-assignment is unavailable rather than embedding a

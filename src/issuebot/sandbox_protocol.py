@@ -46,11 +46,13 @@ from issuebot.config import Connection
 from issuebot.context import RunnerContext
 from issuebot.contracts import (
     Changes,
+    PrPolicy,
     Response,
     SkillRef,
     WorkItem,
     coerce_status,
     parse_outputs,
+    pr_policy,
 )
 from issuebot.state import StateFile
 
@@ -108,9 +110,11 @@ _ENV_COMMENT_EXCERPT = "ISSUEBOT_COMMENT_EXCERPT"
 # at a JSON document where a file path belongs.
 _ENV_CONFIG = "ISSUEBOT_WIRE_CONFIG"
 
-# The board's skills and instruction documents, as one JSON object — like
-# `_ENV_CONFIG`, structured data rather than a plain string, so it gets a
-# channel of its own instead of being packed into one.
+# Everything the board says about *this* item that is not a plain string: its
+# skills, its instruction documents, the prompt its step composed and what that
+# step wants done with the branch. Like `_ENV_CONFIG`, structured data rather
+# than a plain string, so it gets a channel of its own instead of being packed
+# into one.
 _ENV_WORK_CONTEXT = "ISSUEBOT_WORK_CONTEXT"
 
 # The board's run preferences. Each is a plain string, so — like actor/excerpt
@@ -168,6 +172,15 @@ class WorkerEnv:
     skills: tuple[SkillRef, ...] = ()
     instructions: Mapping[str, str] = field(default_factory=dict)
 
+    # What the item's step composed and asked for: the whole run prompt, what
+    # that composition lets the run do, and what to do with the branch the run
+    # pushes (see `WorkItem.prompt`/`.mode`/`.pr`). Resolved at poll time from
+    # board state the sandbox cannot re-query, so a run that does not carry
+    # them obeys a different step than the same run does locally.
+    prompt: str | None = None
+    mode: str | None = None
+    pr: PrPolicy = field(default_factory=PrPolicy)
+
     # The board's run preferences (see `WorkItem.harness`/`.model`) and its own
     # instructions for the agent. Requests, not settings this module acts on —
     # it only ever carries them through.
@@ -200,6 +213,9 @@ class WorkerEnv:
             comment_excerpt=work.comment_excerpt,
             skills=work.skills,
             instructions=work.instructions,
+            prompt=work.prompt,
+            mode=work.mode,
+            pr=work.pr,
             harness=work.harness,
             model=work.model,
             agent_instructions=work.agent_instructions,
@@ -225,13 +241,19 @@ class WorkerEnv:
         ):
             if value:
                 env[key] = str(value)
-        if self.skills or self.instructions:
-            env[_ENV_WORK_CONTEXT] = json.dumps(
-                {
-                    "skills": [asdict(s) for s in self.skills],
-                    "instructions": dict(self.instructions),
-                }
-            )
+        context = {
+            "skills": [asdict(s) for s in self.skills],
+            "instructions": dict(self.instructions),
+            "prompt": self.prompt,
+            "mode": self.mode,
+            "pr": asdict(self.pr),
+        }
+
+        # A default policy is what the worker builds for itself when nobody
+        # sent one, so an item with nothing board-specific to say still sends
+        # no blob at all — the same as before the step's composition rode here.
+        if self.skills or self.instructions or self.prompt or self.mode or self.pr != PrPolicy():
+            env[_ENV_WORK_CONTEXT] = json.dumps(context)
         return env
 
     @classmethod
@@ -253,7 +275,7 @@ class WorkerEnv:
         except json.JSONDecodeError:
             config = {}
 
-        skills, instructions = _decode_work_context(env.get(_ENV_WORK_CONTEXT))
+        context = _decode_work_context(env.get(_ENV_WORK_CONTEXT))
 
         return cls(
             config=config if isinstance(config, dict) else {},
@@ -262,8 +284,11 @@ class WorkerEnv:
             agent_id=env.get(_ENV_AGENT_ID),
             actor_name=env.get(_ENV_ACTOR_NAME),
             comment_excerpt=env.get(_ENV_COMMENT_EXCERPT),
-            skills=skills,
-            instructions=instructions,
+            skills=context.skills,
+            instructions=context.instructions,
+            prompt=context.prompt,
+            mode=context.mode,
+            pr=context.pr,
             harness=env.get(_ENV_HARNESS),
             model=env.get(_ENV_MODEL),
             agent_instructions=env.get(_ENV_AGENT_INSTRUCTIONS),
@@ -282,18 +307,38 @@ class WorkerEnv:
             comment_excerpt=self.comment_excerpt,
             skills=self.skills,
             instructions=self.instructions,
+            prompt=self.prompt,
+            mode=self.mode,
+            pr=self.pr,
             harness=self.harness,
             model=self.model,
             agent_instructions=self.agent_instructions,
         )
 
 
-def _decode_work_context(raw: str | None) -> tuple[tuple[SkillRef, ...], Mapping[str, str]]:
+@dataclass(frozen=True)
+class _WorkContext:
+    """What `_ENV_WORK_CONTEXT` carries, unpacked. One value rather than a
+    widening tuple, so a field added to the blob is named at both ends."""
+
+    skills: tuple[SkillRef, ...] = ()
+    instructions: Mapping[str, str] = field(default_factory=dict)
+    prompt: str | None = None
+    mode: str | None = None
+    pr: PrPolicy = field(default_factory=PrPolicy)
+
+
+def _decode_work_context(raw: str | None) -> _WorkContext:
     """Parse `_ENV_WORK_CONTEXT`, degrading to empty on anything unreadable.
 
     Absent, malformed JSON, or a shape that isn't the one `encode` writes all
     read the same way: the sandbox rebuilds what it was told and no more,
-    matching how an unreadable `_ENV_SOURCE_SETTINGS` degrades above."""
+    matching how an unreadable `_ENV_SOURCE_SETTINGS` degrades above.
+
+    The step's policy is read by `contracts.pr_policy` — the same lenient
+    reader the board's own payload goes through, so the wire and the board
+    agree on what a half-sent policy means.
+    """
     try:
         context = json.loads(raw or "{}")
         skills = tuple(
@@ -306,9 +351,19 @@ def _decode_work_context(raw: str | None) -> tuple[tuple[SkillRef, ...], Mapping
             for s in context.get("skills") or []
         )
         instructions = dict(context.get("instructions") or {})
+        prompt = context.get("prompt")
+        mode = context.get("mode")
+        policy = pr_policy(context.get("pr"))
     except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
-        return (), {}
-    return skills, instructions
+        return _WorkContext()
+
+    return _WorkContext(
+        skills=skills,
+        instructions=instructions,
+        prompt=str(prompt) if prompt else None,
+        mode=str(mode) if mode else None,
+        pr=policy,
+    )
 
 
 def worker_argv(work: WorkItem, *, run_id: str, connection: Connection) -> list[str]:

@@ -31,7 +31,7 @@ from conftest import (
 )
 from issuebot import plugins, release, sandbox_protocol
 from issuebot.config import Config, source_plugin
-from issuebot.contracts import Changed, Job, NeedsInput, Response, SkillRef, WorkItem
+from issuebot.contracts import Changed, Job, NeedsInput, PrPolicy, Response, SkillRef, WorkItem
 from issuebot.plugins.harnesses.fake.harness import FakeHarness
 from issuebot.runner import Wiring
 from issuebot.sandbox import SandboxEnvironment
@@ -683,6 +683,24 @@ def test_skills_instructions_and_the_boards_run_preferences_ride_the_wire():
     assert sent.harness == "codex"
     assert sent.model == "gpt-5"
     assert sent.agent_instructions == "Run the checks."
+
+
+def test_the_steps_composition_and_pr_policy_ride_the_wire():
+    """The step's own prompt, what it lets the run do, and what it wants done
+    with the branch are all read at poll time off state the sandbox cannot
+    re-query — so a sandboxed run only obeys the step if the wire carries them."""
+    provider = FakeProvider()
+    item = work(
+        prompt="Do {reference} the step's way.",
+        mode="research",
+        pr=PrPolicy(create=False, draft=True, reviewers=("ada",)),
+    )
+    _executor(provider).run(_job(item), reporter=RecordingReporter())
+
+    sent = _sent(provider)
+    assert sent.prompt == "Do {reference} the step's way."
+    assert sent.mode == "research"
+    assert sent.pr == PrPolicy(create=False, draft=True, reviewers=("ada",))
 
 
 def test_the_worker_is_told_which_kind_of_work_it_has():
