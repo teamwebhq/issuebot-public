@@ -18,7 +18,7 @@ from pathlib import Path
 from issuebot.events import AgentEvent
 from issuebot.plugins.harnesses.base import Harness, LaunchResult, LaunchSpec
 from issuebot.plugins.harnesses.claude.events import parse_stream_json_line
-from issuebot.process import REAL, Process
+from issuebot.process import NOT_RUN, REAL, Process
 from issuebot.reporter import Reporter
 
 logger = logging.getLogger("issuebot")
@@ -350,14 +350,22 @@ class ClaudeHarness(Harness):
         text = "\n".join(out).strip()
 
         # An empty answer here is the caller's cue to fall back to a mechanical
-        # PR description. Log why it is about to happen, naming the command
-        # and the exit code, so the next one is diagnosable from the log alone.
+        # PR description. Log why it is about to happen, naming the command,
+        # the exit code and what it said, so the next one is diagnosable from
+        # the log alone.
         if code != 0 or not text:
             logger.warning(
-                "PR summary command %r exited %s and returned %s characters of text",
+                "PR summary command %r exited %s and said: %s",
                 self._command,
                 code,
-                len(text),
+                text or "(nothing)",
             )
+
+        # The command never started — it is not on this machine's PATH, or the
+        # folder is gone. What `spawn` collected is its own explanation of that,
+        # not a description of anything, and returning it would have the caller
+        # look for a title in it.
+        if code == NOT_RUN:
+            return ""
 
         return text

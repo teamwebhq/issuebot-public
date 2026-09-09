@@ -1294,6 +1294,31 @@ def test_agent_id_persists_across_restart(tmp_path: Path) -> None:
         sup.stop()
 
 
+def test_what_connect_says_replaces_a_named_agent_id(tmp_path: Path, monkeypatch) -> None:
+    """`$ISSUEBOT_AGENT_ID` gets a runner with no cache through a restart, but the
+    board resolves the agent from the PAT — so its answer is the identity, and a
+    variable naming somebody else corrects itself instead of persisting."""
+    from issuebot import install
+    from issuebot.runner import Supervisor
+
+    cfg_path = tmp_path / "config.toml"
+    save_config(_config_with([_conn("a", "b-a")]), cfg_path)
+    agent_path = tmp_path / "agent_id"
+
+    monkeypatch.setenv(install.AGENT_ID_ENV, "a-stale")
+
+    api = _ConnectIdentityApi(user_id="a1")
+    sup = Supervisor(api, FakeHarness(0), cfg_path, poll_interval=0.05, agent_path=agent_path)
+    sup.start()
+    try:
+        # Known before any connect, then corrected by the one the board made.
+        assert _wait(lambda: sup._agent_id == "a1", 2.0), (
+            f"connect's own answer should win, got {sup._agent_id!r}"
+        )
+    finally:
+        sup.stop()
+
+
 def test_agent_id_resolved_from_conflict_on_durable_connection(tmp_path: Path) -> None:
     """The live-bug case: the agent is already connected to the board (connect → 409)
     AND the local cache is empty (first run of the new runner). The board conveys

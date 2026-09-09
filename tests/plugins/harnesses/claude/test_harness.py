@@ -13,7 +13,7 @@ import time
 from conftest import SpawnRecorder
 from issuebot.plugins.harnesses.base import LaunchSpec
 from issuebot.plugins.harnesses.claude.harness import ClaudeHarness
-from issuebot.process import RealProcess, RecordingProcess
+from issuebot.process import NOT_RUN, RealProcess, RecordingProcess
 
 # One server fragment, in the shape a source hands one over. This harness is
 # told nothing about where it came from, which is what makes it worth asserting.
@@ -342,6 +342,22 @@ def test_summarize_builds_a_read_only_argv_and_returns_text():
     assert "--mcp-config" not in argv
     assert "--model" in argv and argv[argv.index("--model") + 1] == "claude-haiku-4-5"
     assert spawn.cwd == "/repo"
+
+
+def test_summarize_returns_nothing_when_the_command_could_not_start():
+    """`claude` missing from PATH makes `spawn` explain itself on the output it
+    collects. That explanation is not a PR description, and a caller handed it
+    would look for a title in it."""
+    spawn = SpawnRecorder(
+        lines=["could not start claude: [Errno 2] No such file or directory: 'claude'"],
+        exit_code=NOT_RUN,
+    )
+    harness = ClaudeHarness(command="claude", proc=spawn)
+
+    assert (
+        harness.summarize(change="Read `git diff a...b`.", context="ISS-1", model=None, folder="/r")
+        == ""
+    )
 
 
 def test_summarize_may_read_the_change_but_never_write():

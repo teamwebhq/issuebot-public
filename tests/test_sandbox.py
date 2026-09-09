@@ -13,6 +13,8 @@ read-only is a source's judgement, and the sandbox holds no source to ask.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from conftest import (
@@ -336,8 +338,7 @@ def test_warm_boot_uses_the_project_checkpoint():
     assert _sent(provider).boot is BootMode.WARM
 
 
-def test_a_task_checkpoint_resumes_that_task(monkeypatch):
-    _no_bookkeeping(monkeypatch)
+def test_a_task_checkpoint_resumes_that_task():
     provider = FakeProvider(checkpoints=["task-t1", "project-p"])
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
@@ -356,54 +357,108 @@ def test_a_provider_without_checkpoints_always_boots_cold():
     assert provider.checkpoint_deletes == []
 
 
-def test_read_only_work_never_resumes_a_task_checkpoint(monkeypatch):
+def test_read_only_work_never_resumes_a_task_checkpoint():
     """Only a run that could have left a half-finished workspace behind has a
     checkpoint of its own worth resuming into."""
-    _no_bookkeeping(monkeypatch)
     provider = FakeProvider(checkpoints=["task-t1", "project-p"])
     _executor(provider).run(_job(mention()), reporter=RecordingReporter())
 
     assert provider.created["checkpoint"] == "project-p"
 
 
+# --- reclaiming what nobody answered ---------------------------------------
+#
+# The sweep every run does at boot, on the listing the boot ladder already
+# fetched. It is here rather than in a command because a runner nobody
+# administers — a container with no shell and no state — still has to stop
+# paying for checkpoints its tasks abandoned.
+
+
+def _aged(days: float) -> float:
+    return time.time() - days * 24 * 3600
+
+
+def test_a_run_reclaims_the_task_checkpoints_nobody_came_back_to():
+    provider = FakeProvider(checkpoints={"task-old": _aged(8), "task-recent": _aged(1)})
+
+    _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    # `task-t1` is this run's own, cleared by the end-of-run decision.
+    assert "task-old" in provider.checkpoint_deletes
+    assert "task-recent" not in provider.checkpoint_deletes
+
+
+def test_a_sweep_never_takes_the_checkpoint_this_run_resumes_into():
+    """An answer that arrives on the eighth day still resumes into the work: the
+    sweep and the boot ladder read the same listing, and the ladder's choice
+    wins."""
+    provider = FakeProvider(checkpoints={"task-t1": _aged(30)})
+
+    _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    assert provider.created["checkpoint"] == "task-t1"
+    # Deleted at the *end*, as a finished run's own resume point — not swept out
+    # from under the sandbox that booted from it.
+    assert provider.checkpoint_creates == []
+
+
+def test_a_sweep_never_takes_a_connections_warm_boot():
+    """A `project-` checkpoint is a warm start, refreshed by the runs themselves.
+    An old one means the connection has been quiet, not that anybody is waiting."""
+    provider = FakeProvider(checkpoints={"project-p": _aged(400)})
+
+    _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    assert "project-p" not in provider.checkpoint_deletes
+
+
+def test_a_checkpoint_the_provider_cannot_date_is_left_alone():
+    """Age is the whole basis for reclaiming one, so an unknown age is no basis
+    at all — the alternative deletes a paused task's work on a guess."""
+    provider = FakeProvider(checkpoints={"task-undated": None})
+
+    _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    assert "task-undated" not in provider.checkpoint_deletes
+
+
+def test_a_failed_reclaim_does_not_fail_the_run():
+    """Housekeeping in the middle of somebody else's run."""
+    provider = FakeProvider(
+        checkpoints={"task-old": _aged(8)},
+        raises={"delete_checkpoint": RuntimeError("quota")},
+    )
+
+    outcome = _executor(provider).run(_job(work()), reporter=RecordingReporter())
+
+    assert outcome.status == "done"
+
+
 # --- the checkpoint decision ----------------------------------------------
 
 
-def _no_bookkeeping(monkeypatch) -> list[str]:
-    """Silence the on-disk task-checkpoint bookkeeping, recording the calls."""
-    from issuebot import task_checkpoints
-
-    recorded: list[str] = []
-    monkeypatch.setattr(task_checkpoints, "record", recorded.append)
-    monkeypatch.setattr(task_checkpoints, "forget", lambda t: None)
-    return recorded
-
-
-def test_a_cold_run_snapshots_the_workspace_the_moment_it_is_bootstrapped(monkeypatch):
+def test_a_cold_run_snapshots_the_workspace_the_moment_it_is_bootstrapped():
     """The warm boot is worth having for the bootstrap result in it, and worth
     nothing if it also carries a task's work — so it is taken when the worker
     says the workspace is ready, not at the end of the run."""
-    _no_bookkeeping(monkeypatch)
     provider = FakeProvider(checkpoints=[])
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
     assert provider.checkpoint_creates == [("sbx_1", "project-p")]
 
 
-def test_a_worker_that_never_reports_ready_leaves_no_warm_boot(monkeypatch):
+def test_a_worker_that_never_reports_ready_leaves_no_warm_boot():
     """A run whose bootstrap failed, or that died before it — nothing in that
     sandbox is worth every later task starting from."""
-    _no_bookkeeping(monkeypatch)
     provider = FakeProvider(checkpoints=[], emit_ready=False)
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
     assert provider.checkpoint_creates == []
 
 
-def test_read_only_work_still_leaves_a_warm_boot(monkeypatch):
+def test_read_only_work_still_leaves_a_warm_boot():
     """A clone and a bootstrap cost the same whoever asked for them, so the
     workspace a mention prepared is as reusable as any other."""
-    _no_bookkeeping(monkeypatch)
     provider = FakeProvider(checkpoints=[])
     _executor(provider).run(_job(mention()), reporter=RecordingReporter())
 
@@ -411,24 +466,21 @@ def test_read_only_work_still_leaves_a_warm_boot(monkeypatch):
 
 
 @pytest.mark.parametrize("status", ["failed", "aborted", "timed out"])
-def test_an_unfinished_run_keeps_its_own_state(monkeypatch, status):
+def test_an_unfinished_run_keeps_its_own_state(status):
     """A run that could change things and did not finish holds one task's
     part-finished branch — the next attempt's best start, kept under that task's
     own name."""
-    recorded = _no_bookkeeping(monkeypatch)
     provider = FakeProvider(result={"status": status, "outputs": []}, checkpoints=[])
 
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
     assert ("sbx_1", "task-t1") in provider.checkpoint_creates
-    assert recorded == ["t1"]  # so the TTL sweep can reclaim it
     assert provider.checkpoint_deletes == []
 
 
-def test_an_unfinished_read_only_run_has_nothing_to_resume_into(monkeypatch):
+def test_an_unfinished_read_only_run_has_nothing_to_resume_into():
     """Nothing could have changed, so no task checkpoint — only the warm boot
     its bootstrap earned."""
-    _no_bookkeeping(monkeypatch)
     provider = FakeProvider(result={"status": "failed", "outputs": []}, checkpoints=[])
 
     _executor(provider).run(_job(mention()), reporter=RecordingReporter())
@@ -436,34 +488,26 @@ def test_an_unfinished_read_only_run_has_nothing_to_resume_into(monkeypatch):
     assert provider.checkpoint_creates == [("sbx_1", "project-p")]
 
 
-def test_a_warm_run_does_not_re_snapshot(monkeypatch):
-    _no_bookkeeping(monkeypatch)
+def test_a_warm_run_does_not_re_snapshot():
     provider = FakeProvider(checkpoints=["project-p"])
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
     assert provider.checkpoint_creates == []
 
 
-def test_a_finished_run_clears_its_task_checkpoint(monkeypatch):
-    forgotten: list[str] = []
-    from issuebot import task_checkpoints
-
-    monkeypatch.setattr(task_checkpoints, "record", lambda t: None)
-    monkeypatch.setattr(task_checkpoints, "forget", forgotten.append)
+def test_a_finished_run_clears_its_task_checkpoint():
     provider = FakeProvider(checkpoints=["task-t1"])
 
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
     assert provider.checkpoint_deletes == ["task-t1"]
-    assert forgotten == ["t1"]
 
 
-def test_work_waiting_on_a_human_keeps_its_own_checkpoint(monkeypatch):
+def test_work_waiting_on_a_human_keeps_its_own_checkpoint():
     """The other end of the boot ladder's top rung. Nothing populated a
     `task-<id>` checkpoint once `RunStatus.paused` went away; the trigger is now
     the agent's own conclusion — a `needs_input` output — so the next run for
     this task resumes straight back into the sandbox it stopped in."""
-    recorded = _no_bookkeeping(monkeypatch)
     provider = FakeProvider(
         result={"status": "done", "outputs": [NeedsInput(question="which one?").model_dump()]},
         checkpoints=[],
@@ -472,13 +516,11 @@ def test_work_waiting_on_a_human_keeps_its_own_checkpoint(monkeypatch):
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
     assert ("sbx_1", "task-t1") in provider.checkpoint_creates
-    assert recorded == ["t1"]  # so the TTL sweep can find it later
 
 
-def test_a_kept_checkpoint_is_neither_deleted_nor_shared(monkeypatch):
+def test_a_kept_checkpoint_is_neither_deleted_nor_shared():
     """A sandbox held for one task's resume must not also become the warm boot
     every other task in the connection starts from."""
-    _no_bookkeeping(monkeypatch)
     provider = FakeProvider(
         result={"status": "done", "outputs": [NeedsInput(question="which one?").model_dump()]},
         checkpoints=["task-t1"],
@@ -490,11 +532,8 @@ def test_a_kept_checkpoint_is_neither_deleted_nor_shared(monkeypatch):
     assert ("sbx_1", "project-p") not in provider.checkpoint_creates
 
 
-def test_a_failed_snapshot_of_a_paused_run_does_not_fail_the_run(monkeypatch):
-    """Losing the resume point costs a cold start next time, nothing more — and
-    it is not recorded, so the TTL sweep never chases a checkpoint that isn't
-    there."""
-    recorded = _no_bookkeeping(monkeypatch)
+def test_a_failed_snapshot_of_a_paused_run_does_not_fail_the_run():
+    """Losing the resume point costs a cold start next time, nothing more."""
     provider = FakeProvider(
         result={"status": "done", "outputs": [NeedsInput(question="which one?").model_dump()]},
         raises={"create_checkpoint": RuntimeError("quota")},
@@ -503,12 +542,10 @@ def test_a_failed_snapshot_of_a_paused_run_does_not_fail_the_run(monkeypatch):
     outcome = _executor(provider).run(_job(work()), reporter=RecordingReporter())
 
     assert outcome.status == "done"
-    assert recorded == []
 
 
-def test_a_resumed_run_is_not_folded_into_the_project_checkpoint(monkeypatch):
+def test_a_resumed_run_is_not_folded_into_the_project_checkpoint():
     """One task's branch state must not leak into another task's warm boot."""
-    _no_bookkeeping(monkeypatch)
     provider = FakeProvider(checkpoints=["task-t1"])
 
     _executor(provider).run(_job(work()), reporter=RecordingReporter())
@@ -517,8 +554,7 @@ def test_a_resumed_run_is_not_folded_into_the_project_checkpoint(monkeypatch):
 
 
 @pytest.mark.parametrize("failing", ["create_checkpoint", "delete_checkpoint"])
-def test_checkpoint_failures_never_fail_the_run(monkeypatch, failing):
-    _no_bookkeeping(monkeypatch)
+def test_checkpoint_failures_never_fail_the_run(failing):
     provider = FakeProvider(raises={failing: RuntimeError("quota")}, checkpoints=[])
 
     outcome = _executor(provider).run(_job(work()), reporter=RecordingReporter())
@@ -777,10 +813,9 @@ def test_a_stale_template_warns_the_user_to_rebuild():
     assert provider.rebuild_command in warning
 
 
-def test_a_failed_self_update_fails_the_run(monkeypatch):
+def test_a_failed_self_update_fails_the_run():
     """Loudly, rather than working on code we know is the wrong code:
     correctness is the whole reason the update exists."""
-    _no_bookkeeping(monkeypatch)
     provider = FakeProvider(installed_version=OTHER, update_exit=1)
 
     outcome = _executor(provider).run(_job(work()), reporter=RecordingReporter())
@@ -814,8 +849,7 @@ def test_a_successful_update_is_probed_again_before_work():
     ]
 
 
-def test_an_update_that_did_not_change_the_selected_binary_fails(monkeypatch):
-    _no_bookkeeping(monkeypatch)
+def test_an_update_that_did_not_change_the_selected_binary_fails():
     provider = FakeProvider(installed_version="9.8.7", update_applies=False)
 
     outcome = _executor(provider).run(_job(work()), reporter=RecordingReporter())

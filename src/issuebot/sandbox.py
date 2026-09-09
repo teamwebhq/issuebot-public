@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
@@ -125,8 +125,15 @@ class SandboxProvider(Protocol):
         """Destroy a sandbox. May raise; the controller treats it best-effort."""
         ...
 
-    def list_checkpoints(self) -> list[str]:
-        """Existing checkpoint names. Only called when ``supports_checkpoints``."""
+    def checkpoints(self) -> dict[str, float | None]:
+        """Every existing checkpoint, as ``name -> when it was created`` in epoch
+        seconds. Only called when ``supports_checkpoints``.
+
+        ``None`` is a checkpoint the provider cannot date — not the same answer
+        as leaving it out, because the controller boots from what is listed here
+        and reclaims by age (:meth:`SandboxEnvironment._sweep_stale`): an
+        undatable checkpoint is still bootable, and is never swept on a guess.
+        """
         ...
 
     def create_checkpoint(self, sandbox_id: str, name: str) -> None:
@@ -156,11 +163,22 @@ def project_checkpoint(connection: Connection) -> str:
     return f"project-{connection.key}"
 
 
+# How long an unanswered task checkpoint is kept before any run reclaims it
+# (see `SandboxEnvironment._sweep_stale`). A week: long enough for a question
+# asked on a Friday to be answered after a holiday, short enough that a task
+# nobody ever answers is not paid for for ever.
+_CHECKPOINT_TTL = 7 * 24 * 3600
+
+# What marks a checkpoint as one paused task's own, rather than a connection's
+# warm workspace. The single source of the spelling: the boot ladder, the
+# end-of-run decision and the sweep all go through here or through
+# `task_checkpoint`, so none of them can drift from the others.
+TASK_PREFIX = "task-"
+
+
 def task_checkpoint(task_id: str) -> str:
     """The checkpoint holding one paused task's own state."""
-    from issuebot import task_checkpoints
-
-    return task_checkpoints.checkpoint_name(task_id)
+    return f"{TASK_PREFIX}{task_id}"
 
 
 class SandboxEnvironment(ExecutionEnvironment):
@@ -217,13 +235,19 @@ class SandboxEnvironment(ExecutionEnvironment):
         checkpoint: str | None = None
 
         if self._provider.supports_checkpoints:
-            existing = self._provider.list_checkpoints()
+            existing = self._provider.checkpoints()
             own = task_checkpoint(work.task_id)
             shared = project_checkpoint(self._project)
             if resumable and own in existing:
                 mode, checkpoint = BootMode.RESUME, own
             elif shared in existing:
                 mode, checkpoint = BootMode.WARM, shared
+
+            # The listing is already in hand and this run is already talking to
+            # the provider, so the abandoned checkpoints of *other* tasks are
+            # reclaimed here — rather than by a command somebody has to remember
+            # to run against a runner that may keep no files at all.
+            self._sweep_stale(existing, keep=own)
 
         # The provider names its own secrets and its own tool paths; the wire
         # carries everything else.
@@ -378,22 +402,60 @@ class SandboxEnvironment(ExecutionEnvironment):
 
         The other half of the boot ladder's top rung: a run that ended waiting
         on a human keeps the sandbox it was working in, under this task's own
-        checkpoint name, and records when — the TTL sweep (a provider plugin's
-        own `prune-checkpoints` command) reclaims the ones nobody ever came back
-        to answer.
+        checkpoint name. Nothing is written beyond the checkpoint itself: the
+        ones nobody ever comes back to answer are reclaimed by the next run's
+        own boot (:meth:`_sweep_stale`), from the age the provider holding them
+        reports.
 
         The trigger is the agent's own conclusion rather than a way the run
         terminated: any :class:`~issuebot.contracts.NeedsInput` output
         (ADR-0011).
         """
-        from issuebot import task_checkpoints
-
         try:
             self._provider.create_checkpoint(boot.sandbox_id, task_checkpoint(work.task_id))
         except Exception:  # noqa: BLE001 - a failed snapshot only costs a cold resume
             logger.warning("task checkpoint failed for %s", boot.sandbox_id, exc_info=True)
-            return
-        task_checkpoints.record(work.task_id)
+
+    def _sweep_stale(self, existing: Mapping[str, float | None], *, keep: str) -> None:
+        """Delete the task checkpoints nobody came back to answer.
+
+        A ``task-`` checkpoint is one paused run's sandbox, waiting for a human.
+        Most are answered within the day; the ones that are not would otherwise
+        sit in the provider — and on the bill — for ever. So every run reclaims
+        what is older than :data:`_CHECKPOINT_TTL`, on the listing the boot
+        ladder just fetched: no extra call, no bookkeeping, nothing for an
+        operator to run.
+
+        Three things are never swept, whatever their age:
+
+        * ``keep`` — the checkpoint this run may be about to boot from. An
+          answer that arrives on the eighth day still resumes into the work.
+        * A ``project-`` checkpoint, which is a connection's warm start rather
+          than anybody's unanswered question. An old one means the connection
+          has been quiet.
+        * A checkpoint the provider could not date, which is why ``None`` is a
+          distinct answer from absent: age is the whole basis for deleting one,
+          and an unknown age is no basis at all.
+
+        Best-effort throughout: this is housekeeping in the middle of somebody's
+        run, so a failed delete is logged and the run goes on.
+        """
+        cutoff = time.time() - _CHECKPOINT_TTL
+        stale = [
+            name
+            for name, created in existing.items()
+            if name.startswith(TASK_PREFIX)
+            and name != keep
+            and created is not None
+            and created < cutoff
+        ]
+
+        for name in stale:
+            try:
+                self._provider.delete_checkpoint(name)
+                logger.info("reclaimed unanswered task checkpoint %s", name)
+            except Exception:  # noqa: BLE001 - housekeeping never fails a run
+                logger.warning("could not reclaim task checkpoint %s", name, exc_info=True)
 
     def _warm_project(self, boot: Boot) -> None:
         """Snapshot the prepared workspace as this connection's warm boot.
@@ -454,13 +516,10 @@ class SandboxEnvironment(ExecutionEnvironment):
             self._keep_for_resume(boot, work)
             return
 
-        from issuebot import task_checkpoints
-
         try:
             self._provider.delete_checkpoint(task_checkpoint(work.task_id))
         except Exception:  # noqa: BLE001 - deletion is best-effort
             logger.warning("task checkpoint delete failed", exc_info=True)
-        task_checkpoints.forget(work.task_id)
 
     def _destroy(self, sandbox_id: str, run_id: str) -> None:
         """Best-effort teardown. Never raises — it runs in a ``finally``, where a

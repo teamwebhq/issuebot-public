@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime
 
 import pytest
 from typer.testing import CliRunner
@@ -261,17 +262,17 @@ def test_execing_streams_the_command_output():
 def test_listing_checkpoints_returns_their_names():
     payload = json.dumps(
         [
-            {"id": "cp_1", "key": "project-p", "createdAt": "now"},
-            {"id": "cp_2", "key": "task-t1", "createdAt": "now"},
+            {"id": "cp_1", "key": "project-p", "createdAt": "2026-09-01T12:00:00Z"},
+            {"id": "cp_2", "key": "task-t1", "createdAt": "2026-09-01T12:00:00Z"},
         ]
     )
     proc = RecordingProcess(replies={"checkpoint list": completed(out=payload)})
-    assert _provider(proc).list_checkpoints() == ["project-p", "task-t1"]
+    assert list(_provider(proc).checkpoints()) == ["project-p", "task-t1"]
 
 
 def test_no_checkpoints_at_all():
     proc = RecordingProcess(replies={"checkpoint list": completed(out="")})
-    assert _provider(proc).list_checkpoints() == []
+    assert _provider(proc).checkpoints() == {}
 
 
 def test_the_image_wraps_git_and_gh_so_the_provider_names_the_real_ones():
@@ -291,6 +292,49 @@ def test_creating_and_deleting_a_checkpoint():
     # them names the checkpoint after the sandbox and snapshots the wrong one.
     assert proc.calls[0][-4:] == ["create", "task-t1", "--id", "sbx_1"]
     assert proc.calls[1][-2:] == ["delete", "task-t1"]
+
+
+def test_checkpoints_are_dated_by_the_platform_that_holds_them():
+    """The sweep in every run reads each age from Railway, so it needs nothing
+    stored locally — a runner with no persistent disk still reclaims what it
+    never recorded. A date the platform does not give is `None`, never a guess:
+    an undatable checkpoint is still bootable, and is not swept."""
+    rows = json.dumps(
+        [
+            {"key": "task-t1", "createdAt": "2026-09-01T12:00:00Z"},
+            {"key": "task-t2", "createdAt": "2026-09-01T12:00:00"},  # no zone: UTC
+            {"key": "task-t3", "createdAt": "whenever"},
+            {"key": "task-t4"},
+            {"createdAt": "2026-09-01T12:00:00Z"},  # no key: not a checkpoint
+        ]
+    )
+    proc = RecordingProcess(replies={"checkpoint list": completed(0, out=rows)})
+
+    ages = _provider(proc).checkpoints()
+
+    utc_noon = datetime(2026, 9, 1, 12, 0, tzinfo=UTC).timestamp()
+    assert ages == {"task-t1": utc_noon, "task-t2": utc_noon, "task-t3": None, "task-t4": None}
+
+
+def test_deleting_a_checkpoint_that_is_already_gone_is_not_a_failure():
+    """Every finished run deletes its task's resume point, most of which were
+    never created — a delete that finds nothing has the state it asked for."""
+    proc = RecordingProcess(
+        replies={
+            "checkpoint delete": completed(
+                1, err="No checkpoint named `task-t1` in this environment."
+            )
+        }
+    )
+
+    _provider(proc).delete_checkpoint("task-t1")
+
+
+def test_a_checkpoint_delete_that_fails_for_any_other_reason_still_raises():
+    proc = RecordingProcess(replies={"checkpoint delete": completed(1, err="unauthorized")})
+
+    with pytest.raises(RailwayError, match="unauthorized"):
+        _provider(proc).delete_checkpoint("task-t1")
 
 
 # ---------------------------------------------------------------------------

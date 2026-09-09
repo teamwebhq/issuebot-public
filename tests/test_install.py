@@ -159,6 +159,65 @@ def test_supervisor_reuses_install_id_on_second_start(tmp_path: Path) -> None:
         sup.stop()
 
 
+def test_a_named_install_id_wins_over_a_stale_cached_one(tmp_path: Path, monkeypatch) -> None:
+    """The variable is the operator's own statement of which install this is;
+    the file is only a cache of what the last registration minted."""
+    p = tmp_path / "install_id"
+    install.save_install_id(p, "srv-cached")
+    monkeypatch.setenv(install.INSTALL_ID_ENV, "srv-named")
+
+    assert install.load_install_id(p) == "srv-named"
+
+
+def test_a_named_agent_id_wins_over_a_stale_cached_one(tmp_path: Path, monkeypatch) -> None:
+    """Same escape hatch, same precedence: a runner that cannot keep the cache
+    still knows who it is before its first connect."""
+    p = tmp_path / "agent_id"
+    install.save_agent_id(p, "cached")
+    monkeypatch.setenv(install.AGENT_ID_ENV, "named")
+
+    assert install.load_agent_id(p) == "named"
+
+
+def test_a_runner_given_an_install_id_registers_nothing(tmp_path: Path, monkeypatch) -> None:
+    """The case the variable exists for: a container with no persistent storage
+    keeps its identity across a restart instead of arriving as a new install."""
+    from issuebot.config import save_config
+    from issuebot.plugins.harnesses.fake.harness import FakeHarness
+    from issuebot.runner import Supervisor
+
+    cfg_path = tmp_path / "config.toml"
+    install_path = tmp_path / "install_id"
+
+    cfg = config(connections=[])
+    save_config(cfg, cfg_path)
+
+    monkeypatch.setenv(install.INSTALL_ID_ENV, "srv-pinned")
+
+    api = _RegisteringApi(install_id="srv-new")
+    sup = Supervisor(
+        api,
+        FakeHarness(0),
+        cfg_path,
+        poll_interval=0.05,
+        install_path=install_path,
+    )
+    sup.start()
+    try:
+        import time
+
+        time.sleep(0.1)
+
+        assert api.register_calls == []
+        assert sup._install_id == "srv-pinned"
+
+        # Nothing to cache: the id came from the environment, and the
+        # filesystem this runner cannot keep is never written to.
+        assert not install_path.exists()
+    finally:
+        sup.stop()
+
+
 def test_supervisor_survives_registration_failure(tmp_path: Path) -> None:
     """A failing register_install call is logged but does not crash start()."""
     from issuebot.config import save_config

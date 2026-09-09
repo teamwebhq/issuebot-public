@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import typer
 
-from issuebot import task_checkpoints
 from issuebot.config import load_config_or_fail
 from issuebot.plugins.environments.railway import settings as railway_settings
 from issuebot.plugins.environments.railway.environment import TEMPLATE, RailwayProvider
@@ -86,36 +85,3 @@ def build_template(
     """
     RailwayProvider(auth=auth_for(connection)).build_template()
     typer.echo(f"Built template '{TEMPLATE}'.")
-
-
-@app.command("prune-checkpoints")
-def prune_checkpoints(
-    ttl_hours: int = typer.Option(
-        168, "--ttl-hours", help="Delete task-* checkpoints older than this (default: 7 days)."
-    ),
-    connection: str = typer.Option(
-        None, "--connection", help="Railway connection whose token to sweep under."
-    ),
-) -> None:
-    """Delete `task-*` sandbox checkpoints older than the TTL.
-
-    A `task-<id>` checkpoint is created when a run ends waiting on a human (a
-    `needs_input` output) so the next run for that task can resume straight back
-    into it; this sweep reclaims the ones nobody ever came back to answer, past
-    ``--ttl-hours`` (default 7 days).
-
-    Each swept task is forgotten from the local bookkeeping whether or not the
-    Railway-side delete succeeded: it is past its TTL either way, and leaving
-    the entry behind would make every later sweep retry a name that is already
-    gone — which raises and would kill the command. A failed delete is reported,
-    not raised, so one bad entry can't stop the sweep.
-    """
-    provider = RailwayProvider(auth=auth_for(connection))
-    aged = task_checkpoints.aged(ttl_hours * 3600)
-    for task_id in aged:
-        try:
-            provider.delete_checkpoint(task_checkpoints.checkpoint_name(task_id))
-        except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the sweep
-            typer.echo(f"(could not delete checkpoint for {task_id}: {exc})", err=True)
-        task_checkpoints.forget(task_id)
-    typer.echo(f"Pruned {len(aged)} task checkpoint(s).")

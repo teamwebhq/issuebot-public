@@ -21,6 +21,7 @@ import sys
 import textwrap
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -866,7 +867,15 @@ class FakeProvider:
         self._update_exit = update_exit
         self._update_applies = update_applies
 
-        self.checkpoints = list(checkpoints or [])
+        # Names only, or names with the epoch second each was created: a test
+        # that says nothing about age gets checkpoints taken just now, which no
+        # sweep is interested in.
+        now = time.time()
+        self._checkpoints: dict[str, float | None] = (
+            dict(checkpoints)
+            if isinstance(checkpoints, Mapping)
+            else {name: now for name in checkpoints or []}
+        )
         self.created: dict[str, Any] | None = None
         self.destroyed: str | None = None
         self.exec_argv: list[str] | None = None
@@ -952,9 +961,9 @@ class FakeProvider:
         self._maybe_raise("destroy")
         self.destroyed = sandbox_id
 
-    def list_checkpoints(self) -> list[str]:
-        self._maybe_raise("list_checkpoints")
-        return list(self.checkpoints)
+    def checkpoints(self) -> dict[str, float | None]:
+        self._maybe_raise("checkpoints")
+        return dict(self._checkpoints)
 
     def create_checkpoint(self, sandbox_id: str, name: str) -> None:
         self._maybe_raise("create_checkpoint")

@@ -25,7 +25,8 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, ClassVar
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import issuebot
 from issuebot import release
@@ -41,6 +42,12 @@ if TYPE_CHECKING:
 # prebuilt template lets `create` start warm — this exact issuebot release
 # already installed — instead of installing it on every fresh sandbox.
 TEMPLATE = "issuebot-tools"
+
+# How the CLI says a checkpoint delete found no such name ("No checkpoint named
+# `task-…` in this environment."), matched lowercased. Text is the only signal
+# it gives — the delete exits non-zero either way — so a phrasing change turns
+# an already-gone checkpoint back into the warning this recognises.
+_MISSING_CHECKPOINT = "no checkpoint named"
 
 # Every tool a run needs in the sandbox, and the shell that installs one when
 # the base image does not carry it.
@@ -102,6 +109,26 @@ REQUIRED_TOOLS: dict[str, str] = {
     # its own browser tooling and its own arguments.
     "chromium": f"{_APT_INSTALL} chromium fonts-liberation",
 }
+
+
+def _epoch(created: object) -> float | None:
+    """One Railway ``createdAt`` as epoch seconds, or None when it cannot be read.
+
+    ISO 8601 is what the CLI prints, which `fromisoformat` reads — the trailing
+    ``Z`` included. A stamp that carries no zone is read as UTC rather than as
+    this machine's local time: the platform speaks UTC, and guessing the
+    runner's zone would age every checkpoint by hours in one direction or the
+    other.
+    """
+    if not isinstance(created, str) or not created.strip():
+        return None
+
+    try:
+        stamp = datetime.fromisoformat(created.strip())
+    except ValueError:
+        return None
+
+    return stamp.replace(tzinfo=stamp.tzinfo or UTC).timestamp()
 
 
 def ensure_tool_step(tool: str, install: str) -> str:
@@ -293,15 +320,35 @@ class RailwayProvider:
         """Destroy a sandbox."""
         self._check("sandbox", "destroy", sandbox_id)
 
-    def list_checkpoints(self) -> list[str]:
-        """Every checkpoint name that exists in this Railway project.
+    def _checkpoint_rows(self) -> list[dict[str, Any]]:
+        """Every checkpoint this project has, as the CLI's own rows.
 
         The CLI lists ``{id, key, createdAt, environmentId}`` per checkpoint —
-        the name a checkpoint was created under is ``key``, not ``name``. An
-        entry without one is skipped rather than raising, so one unexpected
-        row cannot stop every task from booting."""
+        the name a checkpoint was created under is ``key``, not ``name``. A row
+        that is not an object is dropped here so neither reader below has to
+        ask."""
         out = self._check("sandbox", "checkpoint", "list", "--json")
-        return [key for c in json.loads(out or "[]") if (key := c.get("key"))]
+        return [row for row in json.loads(out or "[]") if isinstance(row, dict)]
+
+    def checkpoints(self) -> dict[str, float | None]:
+        """Every checkpoint in this Railway project, by name, with the epoch
+        second it was created.
+
+        Railway is the only record of when: nothing local is written when a
+        checkpoint is taken, so the controller's sweep reads each age from the
+        platform that holds it — which is what lets a runner with no persistent
+        disk, on a machine that never ran the task, still reclaim it.
+
+        A row with no key is skipped rather than raising, so one unexpected row
+        cannot stop every task from booting. A key whose ``createdAt`` is
+        missing or unreadable is kept with ``None``: it is still a checkpoint to
+        boot from, and only its age is unknown.
+        """
+        return {
+            key: _epoch(row.get("createdAt"))
+            for row in self._checkpoint_rows()
+            if (key := row.get("key"))
+        }
 
     def create_checkpoint(self, sandbox_id: str, name: str) -> None:
         """Snapshot a running sandbox's filesystem into a named checkpoint.
@@ -312,8 +359,20 @@ class RailwayProvider:
         self._check("sandbox", "checkpoint", "create", name, "--id", sandbox_id)
 
     def delete_checkpoint(self, name: str) -> None:
-        """Delete a named checkpoint."""
-        self._check("sandbox", "checkpoint", "delete", name)
+        """Delete a named checkpoint, or do nothing when it is already gone.
+
+        Idempotent, because a name that does not exist is the state the caller
+        asked for. Neither caller can know the checkpoint is still there: the
+        end-of-run decision deletes a task's resume point after every finished
+        run, and the TTL sweep works from local bookkeeping that says only that
+        one was taken once — a checkpoint deleted out of band, or never created
+        because the run before it never paused, is normal rather than a fault.
+        """
+        result = self._run("sandbox", "checkpoint", "delete", name)
+        if result.ok or _MISSING_CHECKPOINT in result.message.lower():
+            return
+
+        raise RailwayError(result.message or f"railway checkpoint delete {name} failed")
 
     # -- project-wide administration ----------------------------------------
 

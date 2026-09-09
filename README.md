@@ -229,6 +229,22 @@ The configuration file is at `~/.config/issuebot/config.toml`. Set the
 credentials. Thus, issuebot writes it with the `0600` permissions. Keep these
 permissions. The board server does not read this file.
 
+At the first start, issuebot registers with the server and keeps the install id
+that it receives in `~/.local/state/issuebot/install_id`. Later starts read the
+file and stay the same install. If the runner cannot keep the file, for example a
+container with no persistent volume, set the `$ISSUEBOT_INSTALL_ID` variable to
+the id of the install. The variable has a higher priority than the file, and a
+runner that has this variable does not register again. Use the id that the
+server gave to a previous registration. The server does not know an id that you
+invent, and telemetry and the per-install controls do not work.
+
+The runner also keeps its own user id, in
+`~/.local/state/issuebot/agent_id`. It learns this id from the first `connect`
+call of a board. The runner needs the id to assign a mention session to itself.
+Set the `$ISSUEBOT_AGENT_ID` variable to give the id to a runner that cannot
+keep the file. A `connect` call that answers with an identity replaces the value
+of the variable, because the board resolves the agent from the credential.
+
 The configuration has a small number of core keys. It also has keys for the five
 plugin axes. The plugin keys have two structures:
 
@@ -903,13 +919,21 @@ You can use local connections and railway connections in one configuration. The
   controller installs its own exact GitHub Release wheel and verifies the
   sandbox again before starting work.
 
-issuebot always deletes the sandbox when the task ends. Delete the checkpoints
-of paused tasks with these commands:
+issuebot always deletes the sandbox when the task ends. It also reclaims the
+checkpoints of paused tasks: each run deletes the `task-` checkpoints that are
+more than 7 days old, at the start, while it reads the list of checkpoints to
+find its own. You do not run a command for this.
 
-```sh
-issuebot railway prune-checkpoints                 # more than 7 days old
-issuebot railway prune-checkpoints --ttl-hours 24
-```
+Each age comes from Railway, and no record is kept locally. Thus, the runner
+reclaims a checkpoint that a different machine made, and a runner with no
+persistent storage reclaims correctly.
+
+Three checkpoints stay, at any age:
+
+- The checkpoint of the task in the run. An answer that comes after 8 days
+  still continues the work.
+- The `project-` checkpoint of each connection, which is the warm start.
+- A checkpoint that Railway does not give a readable date for.
 
 > **Caution.** The Free plan of Railway sets a maximum idle timeout of 5
 > minutes for a sandbox. This is too short for an agent run. Use the Hobby plan
@@ -1208,8 +1232,6 @@ issuebot git clone prune <ref>… | --all | --merged [--force]
 
 issuebot claude session list
 issuebot claude session prune <task-id>… | --all | --completed
-
-issuebot railway prune-checkpoints [--ttl-hours N] [--connection NAME]
 ```
 
 Each `prune` command needs a selector. A `prune` command refuses a workspace
@@ -1219,8 +1241,9 @@ command uses `gh pr view` to find the work that is complete. The
 `issuebot claude session prune --completed` command deletes the entries of
 tasks that are complete on the board.
 
-issuebot deletes nothing automatically. The clones and the worktrees stay until
-you delete them.
+The clones and the worktrees stay until you delete them. Sandbox checkpoints
+are different: each run reclaims the abandoned ones. Refer to
+[Sandbox features](#sandbox-features).
 
 ## Security
 
