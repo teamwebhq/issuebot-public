@@ -310,6 +310,7 @@ def test_report_telemetry_posts_body_and_auth():
         "version": "0.1.0",
         "install_id": "srv-x",
         "hostname": "host-a",
+        "name": None,
         "connections": [
             {
                 "board_id": "b-1",
@@ -363,8 +364,28 @@ def test_report_telemetry_includes_install_id():
         "version": "0.2.0",
         "install_id": "srv-1",
         "hostname": "h",
+        "name": None,
         "connections": [],
     }
+
+
+def test_report_telemetry_carries_the_configured_install_name():
+    """Every report names the install, not just the first registration: a runner
+    given its install id outright never registers, and would otherwise be
+    labelled on the dashboard by whatever hostname it happened to boot with."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"status": "ok"})
+
+    client = _client(handler, install_name="controller-1")
+    try:
+        client.report_telemetry(version="0.2.0", install_id="srv-1", hostname="h", connections=[])
+    finally:
+        client.close()
+
+    assert seen["body"]["name"] == "controller-1"
 
 
 def test_wait_for_commands_204_returns_empty_list():

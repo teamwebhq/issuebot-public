@@ -2,8 +2,9 @@
 
 Two ids live here:
 
-* the Parade-minted **install id**, minted at first registration and reused
-  afterwards so an install stays stable across restarts; and
+* the **install id**, minted by Parade at first registration (or stated
+  outright by the operator) and reused afterwards so an install stays stable
+  across restarts; and
 * the **agent id** — the runner's own user id, learned from the ``connect()``
   response, so a restart (where connect returns 409 with no body) still knows
   who the agent is without a ``GET /me``.
@@ -77,8 +78,9 @@ def load_install_id(path: Path | None = None) -> str | None:
 
     A runner given an id never mints one, so nothing writes the file either —
     :meth:`issuebot.runner.Supervisor.start` registers only when this returns
-    None. The id has to be one the server already knows; a name invented here
-    registers nothing and telemetry goes nowhere.
+    None. The id need not be one the server minted: the first report creates the
+    record for whatever id arrives, in whatever shape that board accepts
+    (Issuebear: a UUID).
     """
     return _named_or_cached(INSTALL_ID_ENV, path or default_install_path())
 

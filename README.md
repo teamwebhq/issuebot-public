@@ -231,12 +231,18 @@ permissions. The board server does not read this file.
 
 At the first start, issuebot registers with the server and keeps the install id
 that it receives in `~/.local/state/issuebot/install_id`. Later starts read the
-file and stay the same install. If the runner cannot keep the file, for example a
-container with no persistent volume, set the `$ISSUEBOT_INSTALL_ID` variable to
-the id of the install. The variable has a higher priority than the file, and a
-runner that has this variable does not register again. Use the id that the
-server gave to a previous registration. The server does not know an id that you
-invent, and telemetry and the per-install controls do not work.
+file and stay the same install.
+
+A runner that cannot keep the file, for example a container with no persistent
+volume, registers again at each start and adds one more install to the
+dashboard. To stop this, set `$ISSUEBOT_INSTALL_ID` to a UUID of your own:
+
+```sh
+ISSUEBOT_INSTALL_ID="$(uuidgen)" issuebot listen
+```
+
+Use one UUID for each runner and keep it. The variable has a higher priority
+than the file, and a runner that has it does not register.
 
 The runner also keeps its own user id, in
 `~/.local/state/issuebot/agent_id`. It learns this id from the first `connect`

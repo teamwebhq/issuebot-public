@@ -364,6 +364,9 @@ class IssuebotClient:
                     "version": version,
                     "install_id": install_id,
                     "hostname": hostname,
+                    # Named on every report, not just at registration: a runner
+                    # handed its install id never registers.
+                    "name": self._install_name,
                     "connections": [
                         {
                             "board_id": s.board,
