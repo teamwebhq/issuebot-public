@@ -168,6 +168,14 @@ class WorkItem:
     # steps could ask.
     pr: PrPolicy = field(default_factory=PrPolicy)
 
+    # The branch this item's work is cut from, already resolved by the board
+    # (the task's own override, else its project's default branch). None is the
+    # board having no opinion, which leaves the runner's own default in charge —
+    # the repository's default branch, exactly as every run behaved before a
+    # board could name one. Only an assigned task carries one; a mention never
+    # does.
+    base_branch: str | None = None
+
     @classmethod
     def from_api(cls, payload: dict[str, Any]) -> WorkItem:
         """Build from a work-list payload, ignoring fields we don't model."""
@@ -197,6 +205,7 @@ class WorkItem:
             mode=payload.get("mode"),
             agent_instructions=payload.get("agent_instructions"),
             pr=pr_policy(payload.get("pr")),
+            base_branch=payload.get("base_branch"),
         )
 
     @property

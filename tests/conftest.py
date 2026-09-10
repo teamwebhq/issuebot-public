@@ -82,6 +82,7 @@ def work(
     mode: str | None = None,
     agent_instructions: str | None = None,
     pr: PrPolicy | None = None,
+    base_branch: str | None = None,
 ) -> WorkItem:
     """A work item, with the fields a test cares about and defaults for the rest.
 
@@ -107,6 +108,7 @@ def work(
         mode=mode,
         agent_instructions=agent_instructions,
         pr=PrPolicy() if pr is None else pr,
+        base_branch=base_branch,
     )
 
 
@@ -791,7 +793,7 @@ class FakeWorkspace(Workspace):
         self.prepare_calls: list[tuple[Any, str]] = []
         self.commit_calls: list[tuple[Prepared, str]] = []
 
-    def prepare(self, connection, ref, *, settings, proc: Process = REAL) -> Prepared:
+    def prepare(self, connection, ref, *, settings, base=None, proc: Process = REAL) -> Prepared:
         self.prepare_calls.append((connection, ref))
         if self._prepare_error is not None:
             raise self._prepare_error

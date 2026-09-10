@@ -179,7 +179,7 @@ def run_one(
     # ordinary prep is idempotent over both.
     if wire.boot is BootMode.WARM:
         workspace, _ = runner.workspace_for(connection, ctx)
-        workspace.refresh(connection, work.ref, reporter=reporter)
+        workspace.refresh(connection, work.ref, reporter=reporter, base=work.base_branch)
 
     return run_work(client, harness, connection, work, run_id=run_id, ctx=ctx, reporter=reporter)
 

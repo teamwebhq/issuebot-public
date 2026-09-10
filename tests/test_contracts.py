@@ -80,6 +80,13 @@ def test_a_step_that_sent_no_policy_gets_the_one_every_run_had_before():
     assert item.pr == PrPolicy(create=True, draft=False, reviewers=())
 
 
+def test_from_api_reads_the_base_branch_the_board_resolved():
+    """The board resolves it — the task's own override, else its project's
+    default — and the runner cuts the work from whatever it says."""
+    item = WorkItem.from_api({"task_id": "t1", "base_branch": "develop"})
+    assert item.base_branch == "develop"
+
+
 def test_an_item_with_neither_has_empty_defaults():
     item = WorkItem.from_api({"task_id": "t1"})
     assert item.skills == ()
@@ -87,6 +94,9 @@ def test_an_item_with_neither_has_empty_defaults():
     assert item.harness is None
     assert item.model is None
     assert item.agent_instructions is None
+
+    # No opinion from the board, which leaves the runner's own default in charge.
+    assert item.base_branch is None
 
 
 def test_the_ref_falls_back_to_the_task_id():

@@ -196,20 +196,36 @@ def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str, bool]
         return None
 
 
-def _base_branch(proc: Process, repo: str) -> str:
-    """The branch a new pull request opens against: the repository's default.
+def _base_branch(proc: Process, repo: str, base: str | None = None) -> str:
+    """The branch a new pull request opens against, for describing the change.
 
-    ``gh pr create`` is never given a ``--base``, so this is the branch it
-    targets, and therefore the far end of everything a new pull request will
-    contain. Empty when ``gh`` cannot say, which the caller falls back from.
+    Answers "what is the far end of everything this new pull request will
+    contain": the branch the board named for the item when it named one — the
+    same branch :func:`_create_pr` passes as ``--base`` — else the repository's
+    default, which is what ``gh`` opens against when no ``--base`` is given.
+    Empty when ``gh`` cannot say, which the caller falls back from.
+
+    Not to be confused with the git workspace's helper of the same name
+    (:func:`issuebot.plugins.workspaces.git.workspace._base_branch`), which
+    answers a different question: which branch a run *cuts from*.
     """
+    if base:
+        return base
+
     result = proc.run(
         ["gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"]
     )
     return result.out.strip() if result.ok else ""
 
 
-def _change(proc: Process, repo: str, folder: str, changes: Changes, number: int | None) -> str:
+def _change(
+    proc: Process,
+    repo: str,
+    folder: str,
+    changes: Changes,
+    number: int | None,
+    base: str | None = None,
+) -> str:
     """Prose telling the summarizer where the change it must describe is.
 
     Handed to the harness whole: the harness carries it into its prompt and
@@ -240,8 +256,8 @@ def _change(proc: Process, repo: str, folder: str, changes: Changes, number: int
     # The base branch names the whole branch; the recorded sha is the fallback
     # when `gh` cannot name it, and an increment described is better than no
     # description at all.
-    base = _base_branch(proc, repo)
-    span = f"{base or changes.base_sha}...{changes.head_sha}"
+    target = _base_branch(proc, repo, base)
+    span = f"{target or changes.base_sha}...{changes.head_sha}"
 
     if folder:
         return (
@@ -257,14 +273,30 @@ def _change(proc: Process, repo: str, folder: str, changes: Changes, number: int
 
 
 def _create_pr(
-    proc: Process, repo: str, branch: str, body: str, *, title: str, draft: bool = False
+    proc: Process,
+    repo: str,
+    branch: str,
+    body: str,
+    *,
+    title: str,
+    draft: bool = False,
+    base: str | None = None,
 ) -> str | None:
     """Open a pull request from ``branch`` and return its url, or ``None``.
+
+    ``base`` is the branch the board said this item's work was cut from, and the
+    pull request has to open against the same one: ``gh`` with no ``--base``
+    opens against the repository's default branch, so work cut from anywhere
+    else would arrive full of somebody else's commits. The flag is omitted
+    entirely when the board named no branch, which leaves ``gh`` doing what it
+    always did.
 
     Reviewers are never named here — see :func:`_request_reviewers` for why they
     are asked for separately, afterwards.
     """
     argv = ["gh", "pr", "create", "-R", repo, "--head", branch, "--title", title, "--body", body]
+    if base:
+        argv += ["--base", base]
     if draft:
         argv.append("--draft")
 
@@ -574,7 +606,14 @@ class GitHubSink(Sink):
             delivery.folder,
             changes,
             delivery.output.summary,
-            change=_change(proc, repo, delivery.folder, changes, existing[0] if existing else None),
+            change=_change(
+                proc,
+                repo,
+                delivery.folder,
+                changes,
+                existing[0] if existing else None,
+                delivery.work.base_branch,
+            ),
             harness=self._harness,
             model=self._summary_model,
             guidance=delivery.guidance,
@@ -586,7 +625,15 @@ class GitHubSink(Sink):
         notes = [f"mechanical description: {fallback}"] if fallback else []
 
         if existing is None:
-            url = _create_pr(proc, repo, changes.branch, signed, title=title, draft=policy.draft)
+            url = _create_pr(
+                proc,
+                repo,
+                changes.branch,
+                signed,
+                title=title,
+                draft=policy.draft,
+                base=delivery.work.base_branch,
+            )
             if url is None:
                 return SinkResult(sink=self.name, ok=False, summary="could not open a pull request")
 

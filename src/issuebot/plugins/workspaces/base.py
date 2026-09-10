@@ -131,9 +131,21 @@ class Workspace(ABC):
 
     @abstractmethod
     def prepare(
-        self, connection: Connection, ref: str, *, settings: BaseModel, proc: Process = REAL
+        self,
+        connection: Connection,
+        ref: str,
+        *,
+        settings: BaseModel,
+        base: str | None = None,
+        proc: Process = REAL,
     ) -> Prepared:
-        """Ensure the task's working copy exists and return where to launch it."""
+        """Ensure the task's working copy exists and return where to launch it.
+
+        ``base`` is the branch the source says this item's work is cut from,
+        already resolved by whoever sent the item. None means it named none, so
+        the workspace uses its own default — and a workspace with no version
+        control has nothing to cut from either way, so it ignores the argument
+        entirely."""
 
     @abstractmethod
     def commit_and_push(
@@ -171,7 +183,13 @@ class Workspace(ABC):
         return None
 
     def refresh(
-        self, connection: Connection, ref: str, *, reporter: Reporter, proc: Process = REAL
+        self,
+        connection: Connection,
+        ref: str,
+        *,
+        reporter: Reporter,
+        base: str | None = None,
+        proc: Process = REAL,
     ) -> None:
         """Top up a working copy inherited from a project checkpoint.
 
@@ -185,6 +203,9 @@ class Workspace(ABC):
 
         No settings argument: what a top-up needs (where the copy lives, what
         the task's ref is) the workspace either holds already or is handed here.
+        ``base`` is the same value :meth:`prepare` takes, for the same reason —
+        a top-up that brought the copy to the wrong branch would leave `prepare`
+        correcting it.
 
         The default does nothing, which is right for any workspace whose
         `prepare` is idempotent and cheap enough not to need warming — hence

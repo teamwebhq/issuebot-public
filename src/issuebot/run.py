@@ -174,7 +174,9 @@ def _prepare(
     changes_permitted = "changes" in job.permits
 
     try:
-        prepared = workspace.prepare(connection, job.work.ref, settings=settings, proc=proc)
+        prepared = workspace.prepare(
+            connection, job.work.ref, settings=settings, base=job.work.base_branch, proc=proc
+        )
     except Exception:  # noqa: BLE001 - any workspace failure is this run's prep failure
         logger.exception("workspace prep failed for %s", job.work.ref)
         if changes_permitted:

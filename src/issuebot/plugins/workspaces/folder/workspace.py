@@ -39,9 +39,18 @@ class FolderWorkspace(Workspace):
         it: a plain folder has no worktree or clone directory to place."""
 
     def prepare(
-        self, connection: Connection, ref: str, *, settings: BaseModel, proc: Process = REAL
+        self,
+        connection: Connection,
+        ref: str,
+        *,
+        settings: BaseModel,
+        base: str | None = None,
+        proc: Process = REAL,
     ) -> Prepared:
-        """Work directly in `connection.folder`, or a throwaway copy of it."""
+        """Work directly in `connection.folder`, or a throwaway copy of it.
+
+        ``base`` is ignored: a plain folder has no version control, so there is
+        no branch to cut anything from."""
         assert isinstance(settings, Settings)
         if settings.folder_init is None:
             return Prepared(folder=connection.local_folder)

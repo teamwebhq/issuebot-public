@@ -49,9 +49,10 @@ def _delivery(
     guidance: str = "",
     forge_env: dict[str, str] | None = None,
     pr: PrPolicy | None = None,
+    base_branch: str | None = None,
 ) -> Delivery:
     return Delivery(
-        work=work(reference=ref, pr=pr),
+        work=work(reference=ref, pr=pr, base_branch=base_branch),
         output=Changed(summary=summary),
         changes=_changes() if changes is _DEFAULT_CHANGES else changes,  # type: ignore[arg-type]
         repo=repo,
@@ -293,6 +294,41 @@ def test_a_new_pull_request_is_described_from_the_whole_branch() -> None:
     change = harness.summarize_calls[0][0]
     assert "main...head-sha" in change
     assert "base-sha" not in change
+
+
+def test_a_pull_request_opens_against_the_branch_the_work_was_cut_from() -> None:
+    """The board gave the task a base branch and the workspace cut the work
+    from it, so the pull request has to target the same branch: opened against
+    the repository default instead, it would carry somebody else's commits."""
+    proc = _happy()
+
+    GitHubSink(proc=proc).deliver(_delivery(base_branch="develop"))
+
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    assert create[create.index("--base") + 1] == "develop"
+
+
+def test_no_base_branch_leaves_gh_targeting_the_repository_default() -> None:
+    """No flag at all, which is what every run did before a board could name
+    one — `gh pr create` then opens against the repository's default branch."""
+    proc = _happy()
+
+    GitHubSink(proc=proc).deliver(_delivery())
+
+    create = next(c for c in proc.calls if c[:3] == ["gh", "pr", "create"])
+    assert "--base" not in create
+
+
+def test_the_description_covers_the_branch_from_its_own_base() -> None:
+    """The far end of a new pull request is the branch it opens against, so a
+    description read from the repository default would describe commits the
+    pull request does not contain."""
+    proc = _happy()
+    harness = FakeHarness(summary="Title: Add the widget")
+
+    GitHubSink(harness=harness, proc=proc).deliver(_delivery(base_branch="develop"))
+
+    assert "develop...head-sha" in harness.summarize_calls[0][0]
 
 
 def test_the_recorded_base_is_used_when_the_forge_cannot_name_the_default() -> None:

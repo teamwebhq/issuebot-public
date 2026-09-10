@@ -10,6 +10,7 @@ for the branch-resolution rules themselves.
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -70,11 +71,15 @@ def _prepare(
     *,
     worktree_root: str | None = None,
     clone_root: str | None = None,
+    base: str | None = None,
 ) -> Prepared:
     """Prepare through the seam: a `GitWorkspace` built the way `runner.
-    workspace_for` builds one, asked through the ABC's own `prepare`."""
+    workspace_for` builds one, asked through the ABC's own `prepare`.
+
+    ``base`` is what the board said this item's work is cut from, exactly as
+    `run.execute` passes `WorkItem.base_branch`."""
     ws = GitWorkspace(worktree_root=worktree_root, clone_root=clone_root)
-    return ws.prepare(conn, ref, settings=Settings())
+    return ws.prepare(conn, ref, settings=Settings(), base=base)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +255,57 @@ def test_prepare_clone_fetches_on_same_ref_reuse(repo: Path, tmp_path: Path):
     prepared = _prepare(p, "ISS-7", clone_root=str(root))
     remote_log = _git(Path(prepared.folder), "log", "--oneline", "origin/main")
     assert "fresh" in remote_log
+
+
+def _with_develop(repo: Path) -> None:
+    """Give the repo a second branch carrying a commit `main` does not have.
+
+    Which branch a task was cut from is then a question the working copy itself
+    answers, rather than one only the git commands could be asked about."""
+    _git(repo, "checkout", "-b", "develop")
+    (repo / "dev.txt").write_text("from develop\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "develop only")
+    _git(repo, "checkout", "main")
+
+
+def test_a_board_set_base_branch_is_what_a_new_task_branch_is_cut_from(repo: Path, tmp_path: Path):
+    """The board resolves a task's base branch (its own override, else its
+    project's default) and issuebot cuts the work from that branch, not from
+    whatever the repository calls default."""
+    _with_develop(repo)
+    p = _project(git_init="branch", repo=str(repo))
+
+    prepared = _prepare(p, "ISS-300", clone_root=str(tmp_path / "cl"), base="develop")
+
+    assert (Path(prepared.folder) / "dev.txt").exists()
+
+
+def test_a_board_that_names_no_base_branch_leaves_the_default_in_charge(repo: Path, tmp_path: Path):
+    """The behaviour every run had before the board could name one."""
+    _with_develop(repo)
+    p = _project(git_init="branch", repo=str(repo))
+
+    prepared = _prepare(p, "ISS-301", clone_root=str(tmp_path / "cl"), base=None)
+
+    assert not (Path(prepared.folder) / "dev.txt").exists()
+    assert (Path(prepared.folder) / "README.md").exists()
+
+
+def test_a_base_branch_the_repository_lacks_falls_back_and_says_so(
+    repo: Path, tmp_path: Path, caplog
+):
+    """A mistyped project setting must not fail every run on that project — but
+    it must not be silent either, or every run is quietly cut from the wrong
+    branch with nothing to say why."""
+    p = _project(git_init="branch", repo=str(repo))
+
+    with caplog.at_level(logging.WARNING, logger="issuebot"):
+        prepared = _prepare(p, "ISS-302", clone_root=str(tmp_path / "cl"), base="no-such-branch")
+
+    assert (Path(prepared.folder) / "README.md").exists()
+    warned = "\n".join(r.getMessage() for r in caplog.records)
+    assert "no-such-branch" in warned and "main" in warned
 
 
 def test_prepare_repoints_origin_when_the_connection_repo_drifted(tmp_path, repo):

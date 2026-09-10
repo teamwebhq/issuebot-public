@@ -508,7 +508,8 @@ The git workspace also uses these keys:
 
 - `branch_prefix` — sets the task branch prefix. The default is `issuebot/`.
 - `update_base` — uses `none`, `rebase`, or `merge`. If there is an `origin`
-  remote, a rebase or merge uses its default branch. The default is `none`.
+  remote, a rebase or merge uses the base branch of the task. The default is
+  `none`.
 - `push` — controls the push after a commit. The default is `true`.
 
 Use `branch_prefix` and `update_base` only with `git_init`. issuebot rejects
@@ -523,6 +524,18 @@ setting for a sink that uses a pushed branch.
 
 A connection with only `folder` uses that folder and does not commit changes.
 Set `folder_init = "copy"` to make a temporary copy for each task.
+
+### The base branch
+
+The board can give a task a base branch. issuebot makes the task branch from
+that branch and updates the task branch from it. A pull request from the task
+branch also uses that branch as its target.
+
+If the board gives no base branch, issuebot uses the default branch of the
+repository.
+
+If the repository does not have the branch that the board gives, issuebot uses
+the default branch and writes a warning. The run continues.
 
 ### Git workspace commands
 

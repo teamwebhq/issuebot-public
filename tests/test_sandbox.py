@@ -739,6 +739,20 @@ def test_the_steps_composition_and_pr_policy_ride_the_wire():
     assert sent.pr == PrPolicy(create=False, draft=True, reviewers=("ada",))
 
 
+def test_the_base_branch_rides_the_wire_onto_the_rebuilt_work_item():
+    """The workspace inside the sandbox cuts the task branch from it, and it is
+    on neither argv nor the task record the worker re-fetches — so it rides the
+    wire or a sandboxed run silently cuts from the repository default."""
+    provider = FakeProvider()
+    _executor(provider).run(_job(work(base_branch="develop")), reporter=RecordingReporter())
+
+    sent = _sent(provider)
+    rebuilt = sent.work_item(task_id="t1", reference="ISS-1", kind="assigned")
+
+    assert sent.base_branch == "develop"
+    assert rebuilt.base_branch == "develop"
+
+
 def test_the_worker_is_told_which_kind_of_work_it_has():
     provider = FakeProvider()
     _executor(provider).run(_job(mention()), reporter=RecordingReporter())

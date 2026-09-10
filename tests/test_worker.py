@@ -285,13 +285,13 @@ def prepped(monkeypatch: pytest.MonkeyPatch) -> list:
         name = "recorder"
         produces = frozenset({"answer"})
 
-        def prepare(self, connection, ref, *, settings, proc=REAL):
+        def prepare(self, connection, ref, *, settings, base=None, proc=REAL):
             raise AssertionError("run_work is stubbed; nothing should prepare here")
 
         def commit_and_push(self, prepared, message, *, settings, proc=REAL):
             raise AssertionError("run_work is stubbed; nothing should commit here")
 
-        def refresh(self, connection, ref, *, reporter, proc=REAL):
+        def refresh(self, connection, ref, *, reporter, base=None, proc=REAL):
             calls.append((connection, ref))
 
     monkeypatch.setattr(runner, "workspace_for", lambda connection, ctx: (Recorder(), None))

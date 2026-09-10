@@ -404,6 +404,41 @@ def _workspace_path_for_branch(project: Connection, branch: str, root: Path) -> 
 # ---------------------------------------------------------------------------
 
 
+def _base_branch(g: Git, base: str | None) -> str:
+    """The branch this run cuts from and keeps fresh against.
+
+    The single seam for that question: `_start_point` (where a brand new task
+    branch is cut) and `_update_base` (what a task branch is rebased or merged
+    from) both come through here, so the two can never disagree about which
+    branch this run's work belongs on top of.
+
+    The board's answer wins when it gave one *and* this repository has it —
+    locally or on origin, which are not the same question in a fresh clone
+    (:meth:`Git.remote_branch_exists`). Everything else falls back to the
+    repository's own default branch, which is what every run used before a
+    board could name one.
+
+    A named branch the repository does not have is a mistyped project setting,
+    and silently cutting from the default instead would leave every run on that
+    project quietly wrong — so it is logged loudly, naming both branches, and
+    the run continues rather than failing.
+    """
+    if not base:
+        return g.default_branch()
+
+    # Best-effort, exactly as `_start_point` fetches: a clone holds origin's
+    # branches as remote-tracking refs only, and asking for a ref origin does
+    # not have is not an error.
+    g.git("fetch", "origin", base)
+
+    if g.branch_exists(base) or g.remote_branch_exists(base):
+        return base
+
+    fallback = g.default_branch()
+    logger.warning("base branch %r is not in this repository; using %r instead", base, fallback)
+    return fallback
+
+
 def _sync_branch(g: Git, branch: str) -> None:
     """Fetch and fast-forward ``branch`` to origin's copy.
 
@@ -423,8 +458,12 @@ def _sync_branch(g: Git, branch: str) -> None:
         raise BranchDiverged(branch, ff.message, folder=g.folder, kind="branch")
 
 
-def _update_base(g: Git, branch: str, mode: str) -> None:
+def _update_base(g: Git, branch: str, mode: str, *, base: str | None = None) -> None:
     """Rebase or merge origin's base branch into the task branch.
+
+    ``base`` is what the board said this item's work is cut from, resolved
+    through :func:`_base_branch` so a task keeps fresh against the same branch
+    it was cut from rather than against the repository default.
 
     A conflict aborts cleanly and raises :class:`BranchDiverged`, so the
     workspace is always left in a state the agent could be handed. No-op when
@@ -432,7 +471,7 @@ def _update_base(g: Git, branch: str, mode: str) -> None:
     if mode == "none" or not g.has_origin():
         return
 
-    base = g.default_branch()
+    base = _base_branch(g, base)
     g.git("fetch", "origin", base)
 
     # The mode rides the exception: it is how this connection wants the base
@@ -587,7 +626,9 @@ def _use_gh_credentials(g: Git) -> None:
         g.git("config", "--local", mode, GH_CREDENTIAL_KEY, value)
 
 
-def _start_point(g: Git, project: Connection, branch: str) -> str | None:
+def _start_point(
+    g: Git, project: Connection, branch: str, *, base: str | None = None
+) -> str | None:
     """Where to cut this task's branch when the copy has no local one yet.
 
     A task can come back long after the working copy that held it went away —
@@ -599,10 +640,11 @@ def _start_point(g: Git, project: Connection, branch: str) -> str | None:
     then had its push rejected, which is a wasted run reported as a sink
     failure.
 
-    Failing that: a fresh clone starts from ``origin/<default>``, so every new
-    task starts from current code. A connection working in its own folder gets
-    None and cuts from whatever the user has checked out — their working copy,
-    their starting point.
+    Failing that: a fresh clone starts from ``origin/<base>`` — the branch the
+    board named for this item, or the repository default when it named none
+    (:func:`_base_branch`) — so every new task starts from current code. A
+    connection working in its own folder gets None and cuts from whatever the
+    user has checked out — their working copy, their starting point.
     """
     if not g.has_origin():
         return None
@@ -614,7 +656,7 @@ def _start_point(g: Git, project: Connection, branch: str) -> str | None:
     if g.remote_branch_exists(branch):
         return f"origin/{branch}"
 
-    return f"origin/{g.default_branch()}" if conn_setting(project, "repo") else None
+    return f"origin/{_base_branch(g, base)}" if conn_setting(project, "repo") else None
 
 
 def _prepare_worktree(
@@ -670,6 +712,7 @@ def _prepare_workspace(
     project: Connection,
     ref: str,
     *,
+    base: str | None = None,
     worktree_root: str | None,
     clone_root: str | None = None,
     proc: Process = REAL,
@@ -685,6 +728,10 @@ def _prepare_workspace(
     branch/worktree/clone, which is what makes the clarify-and-resume loop cheap.
     Raises :class:`GitError` if a git step fails, or :class:`BranchDiverged` when
     the branch needs a human or the agent to reconcile it.
+
+    ``base`` is the branch the board says this item's work is cut from — the
+    task branch is cut from it and kept fresh against it. None leaves the
+    repository's own default branch in charge.
 
     ``git_init`` absent (None) is working directly in the copy, on whatever
     branch is checked out — not a third strategy alongside worktree/branch, but
@@ -703,7 +750,7 @@ def _prepare_workspace(
     # Only consulted when the copy has no local branch of this name yet — a
     # fresh clone, or a folder that never worked this task. Both strategies ask
     # the same question, so both get the same answer.
-    start = _start_point(g, project, branch)
+    start = _start_point(g, project, branch, base=base)
 
     if git_init == "branch":
         folder = _prepare_branch(g, branch, start=start)
@@ -711,7 +758,7 @@ def _prepare_workspace(
         folder = _prepare_worktree(g, project, branch, worktree_root, start=start)
 
     # Either strategy keeps the task branch fresh against its base the same way.
-    _update_base(Git(folder, proc), branch, conn_setting(project, "update_base", "none"))
+    _update_base(Git(folder, proc), branch, conn_setting(project, "update_base", "none"), base=base)
     return folder
 
 
@@ -762,7 +809,9 @@ def _refresh_workspace(
     :func:`_prepare_workspace` call that follows finds an up-to-date, already
     checked-out workspace and does cheap no-op git calls rather than a fresh
     clone — then fetches, hard-resets to ``origin/<base>``, and checks out (or
-    creates) the task branch. ``base`` defaults to the repo's own default branch.
+    creates) the task branch. ``base`` is the branch the board named for this
+    item, resolved through :func:`_base_branch`, which falls back to the repo's
+    own default branch.
 
     A task that has run before continues from its own branch on the remote
     (:func:`_start_point`), not from the base this checkpoint happens to hold:
@@ -784,10 +833,11 @@ def _refresh_workspace(
 
     g = Git(new_path, proc)
     g.check("fetch", "fetch", "origin")
-    g.check("reset", "reset", "--hard", f"origin/{base or g.default_branch()}")
+    base = _base_branch(g, base)
+    g.check("reset", "reset", "--hard", f"origin/{base}")
 
     branch = _resolve_branch(g, project, ref)
-    _prepare_branch(g, branch, start=_start_point(g, project, branch))
+    _prepare_branch(g, branch, start=_start_point(g, project, branch, base=base))
     return str(new_path)
 
 
@@ -1027,9 +1077,19 @@ class GitWorkspace(Workspace):
         return f"a git workspace requires a git repo: {folder}"
 
     def refresh(
-        self, connection: Connection, ref: str, *, reporter: Reporter, proc: Process = REAL
+        self,
+        connection: Connection,
+        ref: str,
+        *,
+        reporter: Reporter,
+        base: str | None = None,
+        proc: Process = REAL,
     ) -> None:
         """Rename the checkpoint's inherited clone onto this task's ref and reset it.
+
+        ``base`` is the branch the board named for this item, so the reset puts
+        somebody else's checkpoint onto *this* task's base rather than the
+        repository default.
 
         The warm-boot top-up: :func:`_refresh_workspace` moves and resets the
         clone so the :meth:`prepare` that follows finds an up-to-date checkout,
@@ -1044,7 +1104,9 @@ class GitWorkspace(Workspace):
         the pipeline — re-detects the divergence and reports it as
         `Prepared.problem`, the same path a local run takes."""
         try:
-            folder = _refresh_workspace(connection, ref, clone_root=self._clone_root, proc=proc)
+            folder = _refresh_workspace(
+                connection, ref, base=base, clone_root=self._clone_root, proc=proc
+            )
         except BranchDiverged as exc:
             if not exc.folder:
                 raise  # no launchable workspace: the warming assumption broke
@@ -1059,11 +1121,21 @@ class GitWorkspace(Workspace):
         provision.provision(folder, reporter=reporter)
 
     def prepare(
-        self, connection: Connection, ref: str, *, settings: BaseModel, proc: Process = REAL
+        self,
+        connection: Connection,
+        ref: str,
+        *,
+        settings: BaseModel,
+        base: str | None = None,
+        proc: Process = REAL,
     ) -> Prepared:
         """Cut (or reuse) the task's working copy, and record its starting sha
         so `commit_and_push` can later diff against exactly what the agent
         started from, not whatever the base branch has become since.
+
+        ``base`` is the branch the board says this item's work is cut from,
+        carried straight through to :func:`_base_branch` — the one place that
+        decides which branch this run cuts from and updates against.
 
         A diverged branch is not a failure here: `_sync_branch`/`_update_base`
         both leave the workspace clean and checked out when they raise, so the
@@ -1076,6 +1148,7 @@ class GitWorkspace(Workspace):
             folder = _prepare_workspace(
                 connection,
                 ref,
+                base=base,
                 worktree_root=self._worktree_root,
                 clone_root=self._clone_root,
                 proc=proc,

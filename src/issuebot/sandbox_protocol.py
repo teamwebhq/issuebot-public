@@ -123,6 +123,10 @@ _ENV_HARNESS = "ISSUEBOT_HARNESS"
 _ENV_MODEL = "ISSUEBOT_MODEL"
 _ENV_AGENT_INSTRUCTIONS = "ISSUEBOT_AGENT_INSTRUCTIONS"
 
+# The branch the board says this item's work is cut from. A plain string, so it
+# rides its own variable beside the preferences above rather than the JSON blob.
+_ENV_BASE_BRANCH = "ISSUEBOT_BASE_BRANCH"
+
 
 @dataclass(frozen=True)
 class WorkerEnv:
@@ -188,6 +192,11 @@ class WorkerEnv:
     model: str | None = None
     agent_instructions: str | None = None
 
+    # The branch this item's work is cut from (see `WorkItem.base_branch`).
+    # Resolved by the board at poll time, so — like everything above — it
+    # reaches the workspace inside the sandbox only if this value carries it.
+    base_branch: str | None = None
+
     @classmethod
     def for_run(
         cls,
@@ -219,6 +228,7 @@ class WorkerEnv:
             harness=work.harness,
             model=work.model,
             agent_instructions=work.agent_instructions,
+            base_branch=work.base_branch,
         )
 
     def encode(self) -> dict[str, str]:
@@ -238,6 +248,7 @@ class WorkerEnv:
             (_ENV_HARNESS, self.harness),
             (_ENV_MODEL, self.model),
             (_ENV_AGENT_INSTRUCTIONS, self.agent_instructions),
+            (_ENV_BASE_BRANCH, self.base_branch),
         ):
             if value:
                 env[key] = str(value)
@@ -292,6 +303,7 @@ class WorkerEnv:
             harness=env.get(_ENV_HARNESS),
             model=env.get(_ENV_MODEL),
             agent_instructions=env.get(_ENV_AGENT_INSTRUCTIONS),
+            base_branch=env.get(_ENV_BASE_BRANCH),
         )
 
     def work_item(self, *, task_id: str, reference: str | None, kind: str) -> WorkItem:
@@ -313,6 +325,7 @@ class WorkerEnv:
             harness=self.harness,
             model=self.model,
             agent_instructions=self.agent_instructions,
+            base_branch=self.base_branch,
         )
 
 
