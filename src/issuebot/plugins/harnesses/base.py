@@ -139,7 +139,6 @@ class Harness(ABC):
     def summarize(
         self,
         *,
-        context: str,
         change: str,
         model: str | None,
         folder: str,
@@ -159,6 +158,12 @@ class Harness(ABC):
         knowing how a forge shows a change stays in the sink. Handing the agent
         the way to look, rather than a diff cut to fit a prompt, is what lets a
         large change be described from all of itself.
+
+        It is also the *only* account of the change this call gets. A run's own
+        report of what it did is deliberately not passed: a task worked in
+        several steps calls this once per step, and a report of the newest step
+        describes the smallest part of what the reviewer will open. The change
+        itself is the whole of it, and reading it is the job.
 
         ``guidance`` is the board's own PR-writing guidance for this run
         (``Delivery.guidance``, already resolved prose), to weave into the

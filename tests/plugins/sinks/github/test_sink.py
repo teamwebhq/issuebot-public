@@ -240,11 +240,17 @@ def test_a_repo_url_naming_no_repository_is_refused_not_guessed_at() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _with_open_pr(number: int = 4, *, draft: bool = False, **replies: object) -> RecordingProcess:
+def _with_open_pr(
+    number: int = 4,
+    *,
+    draft: bool = False,
+    title: str = "Add the widget",
+    **replies: object,
+) -> RecordingProcess:
     """A happy process whose branch already carries open pull request ``number``."""
     row = (
         f'{{"number": {number}, "url": "https://github.com/o/r/pull/{number}", '
-        f'"isDraft": {str(draft).lower()}}}'
+        f'"isDraft": {str(draft).lower()}, "title": "{title}"}}'
     )
     return _happy(**{"gh pr list": completed(out=f"[{row}]"), **replies})
 
@@ -279,6 +285,22 @@ def test_the_description_of_a_second_run_covers_the_whole_pull_request() -> None
     change = harness.summarize_calls[0][0]
     assert "gh pr diff 7 -R o/r" in change
     assert "base-sha...head-sha" not in change
+
+
+def test_a_mechanical_fallback_keeps_the_pull_requests_existing_title() -> None:
+    """A later step's `Changed.summary` describes that step alone, so titling a
+    pull request from it renames the whole change after its last slice. With no
+    model-written title to replace it, the title already on the pull request is
+    the one that covers the whole branch, so it stays."""
+    proc = _with_open_pr(number=7, title="ISS-1: Add the widget and the gauge")
+
+    result = GitHubSink(proc=proc).deliver(_delivery(summary="fixed a typo in the docstring"))
+
+    assert result.ok
+    edit = next(c for c in proc.calls if c[:3] == ["gh", "pr", "edit"])
+    assert edit[edit.index("--title") + 1] == "ISS-1: Add the widget and the gauge"
+    # The body still reports this run — only the title is whole-branch.
+    assert "fixed a typo in the docstring" in edit[edit.index("--body") + 1]
 
 
 def test_a_new_pull_request_is_described_from_the_whole_branch() -> None:
@@ -425,8 +447,7 @@ def test_uses_the_harness_summary_when_one_is_available() -> None:
     assert result.ok
     assert result.summary == "opened PR"
     assert len(harness.summarize_calls) == 1
-    change, context, model, folder, guidance, _ = harness.summarize_calls[0]
-    assert context == "did the thing"  # the agent's own Changed.summary
+    change, model, folder, guidance, _ = harness.summarize_calls[0]
     assert model == "haiku"
     assert folder == "/repo"
     assert guidance == ""  # the delivery carried none
@@ -448,7 +469,7 @@ def test_the_summarizer_call_carries_the_runs_forge_credentials() -> None:
 
     GitHubSink(harness=harness, proc=proc).deliver(_delivery(forge_env={"GH_TOKEN": "t"}))
 
-    assert harness.summarize_calls[0][5] == {"GH_TOKEN": "t"}
+    assert harness.summarize_calls[0][4] == {"GH_TOKEN": "t"}
 
 
 def test_the_pr_summary_call_carries_the_boards_guidance() -> None:
@@ -460,7 +481,7 @@ def test_the_pr_summary_call_carries_the_boards_guidance() -> None:
     GitHubSink(harness=harness, proc=proc).deliver(_delivery(guidance="Title in the imperative."))
 
     assert len(harness.summarize_calls) == 1
-    assert harness.summarize_calls[0][4] == "Title in the imperative."
+    assert harness.summarize_calls[0][3] == "Title in the imperative."
 
 
 def test_a_checkout_is_told_to_read_the_change_locally() -> None:

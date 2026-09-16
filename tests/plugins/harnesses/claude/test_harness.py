@@ -333,7 +333,6 @@ def test_summarize_builds_a_read_only_argv_and_returns_text():
     harness = ClaudeHarness(command="claude", proc=spawn)
     out = harness.summarize(
         change="Read `git diff a...b`.",
-        context="ISS-1: Add widget",
         model="claude-haiku-4-5",
         folder="/repo",
     )
@@ -354,10 +353,7 @@ def test_summarize_returns_nothing_when_the_command_could_not_start():
     )
     harness = ClaudeHarness(command="claude", proc=spawn)
 
-    assert (
-        harness.summarize(change="Read `git diff a...b`.", context="ISS-1", model=None, folder="/r")
-        == ""
-    )
+    assert harness.summarize(change="Read `git diff a...b`.", model=None, folder="/r") == ""
 
 
 def test_summarize_may_read_the_change_but_never_write():
@@ -367,7 +363,7 @@ def test_summarize_may_read_the_change_but_never_write():
     written description."""
     spawn = SpawnRecorder(lines=["Add widget", "body"])
     harness = ClaudeHarness(command="claude", proc=spawn)
-    harness.summarize(change="Read `git diff a...b`.", context="ISS-1", model=None, folder="/repo")
+    harness.summarize(change="Read `git diff a...b`.", model=None, folder="/repo")
 
     argv = spawn.argv
     assert "--dangerously-skip-permissions" not in argv
@@ -382,9 +378,7 @@ def test_summarize_is_told_where_the_change_is_rather_than_handed_it():
     is described from all of itself, so what travels is where to look."""
     spawn = SpawnRecorder(lines=["Add widget", "body"])
     harness = ClaudeHarness(command="claude", proc=spawn)
-    harness.summarize(
-        change="Read `gh pr diff 7 -R o/r`.", context="ISS-1", model=None, folder="/repo"
-    )
+    harness.summarize(change="Read `gh pr diff 7 -R o/r`.", model=None, folder="/repo")
 
     assert "gh pr diff 7 -R o/r" in (spawn.stdin or "")
 
@@ -396,7 +390,6 @@ def test_summarize_carries_the_runs_forge_credentials():
     harness = ClaudeHarness(command="claude", proc=spawn)
     harness.summarize(
         change="Read `gh pr diff 7 -R o/r`.",
-        context="ISS-1",
         model=None,
         folder="/repo",
         env={"GH_TOKEN": "t"},
@@ -413,7 +406,6 @@ def test_summarize_weaves_the_boards_guidance_into_the_prompt():
     harness = ClaudeHarness(command="claude", proc=spawn)
     harness.summarize(
         change="Read `git diff a...b`.",
-        context="ISS-1",
         model=None,
         folder="/repo",
         guidance="Title in the imperative.",

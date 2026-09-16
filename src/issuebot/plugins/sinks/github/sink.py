@@ -39,7 +39,7 @@ import json
 import logging
 import re
 import tempfile
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 from issuebot.contracts import Changed, PullRequestRef, SinkResult
 from issuebot.plugins.sinks.base import Sink
@@ -157,8 +157,23 @@ def _signed(body: str, delivery: Delivery) -> str:
     return f"{body}\n\n---\n\nOpened by **{author}**." if author else body
 
 
-def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str, bool] | None:
-    """The branch's open pull request as ``(number, url, draft)``, or ``None``.
+class OpenPr(NamedTuple):
+    """The open pull request a branch already has, as this sink needs to see it.
+
+    A tuple rather than a model because it is read positionally in the two
+    places that unpack it; named because ``title`` would otherwise be a fourth
+    anonymous slot, and it is the one field whose meaning is not obvious from
+    its value.
+    """
+
+    number: int
+    url: str
+    draft: bool
+    title: str
+
+
+def _existing_pr(proc: Process, repo: str, branch: str) -> OpenPr | None:
+    """The branch's open pull request, or ``None``.
 
     Scoped with ``pr list --state open`` rather than ``pr view <branch>``: the
     latter also matches a closed or merged PR, so a reused branch would report
@@ -169,6 +184,10 @@ def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str, bool]
     request it finds, and ``gh pr edit`` is addressed by number. The draft flag
     comes back with it because the step's policy decides about it — a draft this
     run is meant to open for review has to be recognised as a draft first.
+
+    The title comes back too, as the fallback for a run that cannot write one:
+    see :func:`_describe`. It is the only whole-branch title in reach when the
+    summarizer is silent.
     """
     argv = [
         "gh",
@@ -181,7 +200,7 @@ def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str, bool]
         "--state",
         "open",
         "--json",
-        "number,url,isDraft",
+        "number,url,isDraft,title",
     ]
     result = proc.run(argv)
     if not result.ok:
@@ -191,7 +210,12 @@ def _existing_pr(proc: Process, repo: str, branch: str) -> tuple[int, str, bool]
     # of them mean the same thing here — nothing open to write to.
     try:
         row = json.loads(result.out)[0]
-        return int(row["number"]), str(row["url"]), bool(row.get("isDraft"))
+        return OpenPr(
+            number=int(row["number"]),
+            url=str(row["url"]),
+            draft=bool(row.get("isDraft")),
+            title=str(row.get("title") or ""),
+        )
     except (json.JSONDecodeError, TypeError, KeyError, IndexError, ValueError):
         return None
 
@@ -345,7 +369,7 @@ def _rewrite_pr(proc: Process, repo: str, number: int, body: str, *, title: str)
 def _refresh_pr(
     proc: Process,
     repo: str,
-    existing: tuple[int, str, bool],
+    existing: OpenPr,
     body: str,
     *,
     title: str,
@@ -359,7 +383,7 @@ def _refresh_pr(
     rather than raised: the branch is pushed and the pull request is there to
     read, so none of it is worth failing the delivery over.
     """
-    number, _url, draft = existing
+    number, _url, draft, _title = existing
 
     if _rewrite_pr(proc, repo, number, body, title=title):
         verb = "updated PR"
@@ -426,11 +450,25 @@ def _describe(
     guidance: str,
     ref: str,
     env: Mapping[str, str],
+    existing_title: str = "",
 ) -> tuple[str, str, str]:
     """The PR ``(title, body, fallback_reason)``: ask the harness to read the
     change ``change`` names and write one, falling back to the agent's own
     change summary (plus ``git diff --stat``) when there is no harness, the
     call fails, or it comes back empty.
+
+    ``summary`` is this run's own report and reaches the fallback only — the
+    summarizer is told where the whole change is and reads it, and a run's
+    account of its own step is not evidence about the rest of the branch.
+
+    ``existing_title`` is the title already on the pull request, empty when
+    there is none yet. It outranks the agent's summary on the fallback path,
+    and only there: ``summary`` describes *this run*, so on the second and
+    later steps of a workflow titling from it renames the whole pull request
+    after its most recent slice. The title on the pull request was written
+    against more of the branch than this run saw, so keeping it is the smaller
+    lie. The body is still rewritten from this run — a stale title misleads at
+    a glance, a body that reports the latest work does not.
 
     The harness is told where to look rather than handed a diff: a change too
     large for one prompt used to be described from a truncated copy of itself,
@@ -457,7 +495,6 @@ def _describe(
             # happens to be sitting in.
             with tempfile.TemporaryDirectory() as scratch:
                 text = harness.summarize(
-                    context=summary,
                     change=change,
                     model=model,
                     folder=folder or scratch,
@@ -488,7 +525,9 @@ def _describe(
                 "PR summary for %s is unusable (%s); using a mechanical description", ref, reason
             )
 
-    mechanical_title = summary.strip().splitlines()[0] if summary.strip() else ref
+    mechanical_title = existing_title or (
+        summary.strip().splitlines()[0] if summary.strip() else ref
+    )
 
     # Markdown, so the diffstat renders as a diffstat rather than one mangled
     # line: the agent's summary as the opening paragraph, then the stat fenced.
@@ -611,7 +650,7 @@ class GitHubSink(Sink):
                 repo,
                 delivery.folder,
                 changes,
-                existing[0] if existing else None,
+                existing.number if existing else None,
                 delivery.work.base_branch,
             ),
             harness=self._harness,
@@ -619,6 +658,7 @@ class GitHubSink(Sink):
             guidance=delivery.guidance,
             ref=delivery.work.ref,
             env=delivery.forge_env,
+            existing_title=existing.title if existing else "",
         )
         signed = _signed(body, delivery)
 
@@ -642,7 +682,7 @@ class GitHubSink(Sink):
             draft = policy.draft
 
         else:
-            number, url, _ = existing
+            number, url = existing.number, existing.url
             verb, draft = _refresh_pr(
                 proc, repo, existing, signed, title=title, wants_draft=policy.draft, notes=notes
             )

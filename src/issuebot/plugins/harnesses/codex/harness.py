@@ -74,7 +74,6 @@ class CodexHarness(Harness):
     def summarize(
         self,
         *,
-        context: str,
         change: str,
         model: str | None,
         folder: str,

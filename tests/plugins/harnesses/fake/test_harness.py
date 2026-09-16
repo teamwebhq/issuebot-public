@@ -70,14 +70,13 @@ def test_fake_harness_summarize_records_and_returns():
     harness = FakeHarness(summary="Title line\nThe body")
     out = harness.summarize(
         change="read the range",
-        context="ctx",
         model="m",
         folder="/tmp/p",
         guidance="g",
         env={"K": "v"},
     )
     assert out == "Title line\nThe body"
-    assert harness.summarize_calls == [("read the range", "ctx", "m", "/tmp/p", "g", {"K": "v"})]
+    assert harness.summarize_calls == [("read the range", "m", "/tmp/p", "g", {"K": "v"})]
 
 
 # ---------------------------------------------------------------------------

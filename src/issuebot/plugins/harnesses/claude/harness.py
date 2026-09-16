@@ -61,8 +61,7 @@ _SUMMARY_PROMPT = (
     "before that line is ignored — so a note about reading the change can "
     "never be mistaken for the title. Do not include backticks around the "
     "whole response.\n\n"
-    "{guidance}\n\n"
-    "Task context:\n{context}\n"
+    "{guidance}\n"
 )
 
 # What the description call may do: look at the change, and nothing else. Every
@@ -325,7 +324,6 @@ class ClaudeHarness(Harness):
     def summarize(
         self,
         *,
-        context: str,
         change: str,
         model: str | None,
         folder: str,
@@ -335,7 +333,7 @@ class ClaudeHarness(Harness):
         """Generate PR text via a read-only, MCP-free `claude -p` that reads the
         change ``change`` names. Runs in ``folder`` and returns the collected
         stdout."""
-        prompt = _SUMMARY_PROMPT.format(guidance=guidance, context=context, change=change)
+        prompt = _SUMMARY_PROMPT.format(guidance=guidance, change=change)
         argv = self._summary_argv(model)
         out: list[str] = []
         code = self._proc.spawn(

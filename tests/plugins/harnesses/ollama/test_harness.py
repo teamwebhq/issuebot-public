@@ -117,7 +117,6 @@ def test_ollama_summarize_runs_through_launch_and_stays_read_only(reporter):
 
     out = harness.summarize(
         change="Read `git diff a...b`.",
-        context="ISS-1: Add widget",
         model="glm-4.7-flash",
         folder="/repo",
     )
